@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools", "wheel"] #, "pybind11>=2.10", "numpy"]
+build-backend = "setuptools.build_meta"
+
+# TODO: add project metadata and copyright later
+
+[project]
+name = "dolgov-path-planning"
+version = "0.1.0"
+description = "Hybrid A* path planning (Dolgov et al.) with optional C++ kernel"
+requires-python = ">=3.10"
+dependencies = ["numpy", "scipy"]
+
+[project.optional-dependencies]
+cpp = ["pybind11>=2.10"] #, "hybrid-core @ file://./cpp_kernels/build/hybrid_core-0.1.0-cp310-cp310-win_amd64.whl"]
+dev = ["pytest>=7.0", "pybind11>=2.10"]
+
+
+#! FIXCHANGE: should be unnecessary - the main entry point will likely be pytest or a CLI script later
+[tool.setuptools]
+py-modules = ["main", "planners", "models", "structs", "utils", "cpp_kernels"]
+

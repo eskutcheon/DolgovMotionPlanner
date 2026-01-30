@@ -1,0 +1,6 @@
+include pyproject.toml
+include setup.py
+include pytest.ini
+include README.md
+recursive-include cpp *.cpp *.h
+recursive-include tests *.py
