@@ -14,7 +14,7 @@ if str(REPO_ROOT) not in sys.path:
 @pytest.fixture
 def grid_spec():
     from structs import GridSpec
-    return GridSpec(resolution=1.0, theta_bins=72, origin_xy=(0.0, 0.0))
+    return GridSpec(resolution=1.0, theta_bins=72, origin_xy=(0.0, 0.0), kappa_bins=36)
 
 
 @pytest.fixture
@@ -31,8 +31,9 @@ def planner_config(grid_spec, vehicle_params):
         grid=grid_spec,
         vehicle=vehicle_params,
         step_size=1.0,
-        n_substeps=4,
-        steering_samples=7,
+        n_substeps=5,
+        # steering_samples=7,
+        kappa_rate_samples=10,
         allow_reverse=True,
         # keep the nonholonomic table smaller for tests
         nonholonomic_table_xy_radius=8.0,
@@ -45,7 +46,7 @@ def planner_config(grid_spec, vehicle_params):
 @pytest.fixture
 def empty_grid(grid_spec):
     from models import OccupancyGrid
-    occ = np.zeros((60, 60), dtype=np.bool_)
+    occ = np.zeros((60, 60), dtype=bool)
     return OccupancyGrid(occ, grid_spec)
 
 
@@ -53,11 +54,39 @@ def empty_grid(grid_spec):
 def grid_with_wall(grid_spec):
     """ A grid with a vertical wall and a gap. """
     from models import OccupancyGrid
-    occ = np.zeros((60, 60), dtype=np.bool_)
+    occ = np.zeros((60, 60), dtype=bool)
     # Wall at x=30 with a gap at y in [28,32]
     occ[:, 30] = True
     occ[28:33, 30] = False
     return OccupancyGrid(occ, grid_spec)
+
+
+# @pytest.fixture
+# def grid_with_obstacles(grid_spec):
+#     """ A grid with random obstacles. """
+#     from models import OccupancyGrid
+#     from utils import generate_random_maze_grid
+#     occ = generate_random_maze_grid(80, 80, obstacle_prob=0.1, seed=42)
+#     return OccupancyGrid(occ, grid_spec)
+
+@pytest.fixture
+def maze_grid_file():
+    return np.random.choice(list((Path(__file__).parent / "grids").glob("*.npz")))
+
+
+@pytest.fixture
+def states_from_maze(grid_spec, maze_grid_file):
+    """ A grid with predefined obstacles for deterministic tests. """
+    from models import OccupancyGrid
+    # occ = np.zeros((60, 60), dtype=bool)
+    # # Add some obstacles
+    # occ[10:15, 10:15] = True
+    # occ[20:25, 40:45] = True
+    # occ[35:40, 20:25] = True
+    # occ[45:50, 50:55] = True
+    # return OccupancyGrid(occ, grid_spec)
+    occ_grid, start, goal = OccupancyGrid.grid_from_file(maze_grid_file, grid_spec)
+    return occ_grid, start, goal
 
 
 @pytest.fixture

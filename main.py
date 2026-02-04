@@ -22,18 +22,18 @@ from planners import planner_factory
 
 def plan_example(backend: str = "python") -> None:
     # Toy map (mostly empty) with a thin vertical obstacle.
-    occ = np.zeros((200, 200), dtype=np.bool_)
+    occ = np.zeros((200, 200), dtype=bool)
     occ[80:120, 100] = True
-    grid = GridSpec(resolution=0.5, theta_bins=72, origin_xy=(0.0, 0.0))
+    grid = GridSpec(resolution=0.5, theta_bins=72, origin_xy=(0.0, 0.0), kappa_bins=36)
     og = OccupancyGrid(occ, grid)
     print("grid created: ", grid)
     cfg = PlannerConfig(grid=grid, vehicle=VehicleParams())
     print("planner config: ", cfg)
     planner = planner_factory(og, cfg, backend=backend)
     print("planner created with backend:", backend)
-    start = Pose(5.0, 5.0, math.radians(0.0))
-    goal = GoalSpec(Pose(80.0, 80.0, math.radians(90.0)))
-    path, stats = planner.plan(start, goal, max_expansions=50_000)
+    start = Pose(5.0, 5.0, math.radians(0.0), 0.0)
+    goal = GoalSpec(Pose(80.0, 80.0, math.radians(90.0), 0.0))
+    path, stats = planner.plan(start, goal, max_expansions=100_000)
     print("planning completed.")
     print(
         f"backend={backend} | path poses={len(path)} | expanded={stats.expanded} | "

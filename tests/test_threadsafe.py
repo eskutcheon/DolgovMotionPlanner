@@ -11,7 +11,7 @@ def test_planner_can_be_called_concurrently(empty_grid, planner_config, start_po
     planner = planner_factory(empty_grid, planner_config, backend="python")
 
     def run_once():
-        path, stats = planner.plan(start_pose, goal_spec, max_expansions=20_000)
+        path, stats = planner.plan(start_pose, goal_spec, max_expansions=50_000)
         return len(path), stats.expanded
 
     with ThreadPoolExecutor(max_workers=2) as ex:
@@ -19,6 +19,6 @@ def test_planner_can_be_called_concurrently(empty_grid, planner_config, start_po
         b = ex.submit(run_once)
         la, ea = a.result()
         lb, eb = b.result()
-    assert la > 1 and lb > 1
-    assert ea > 0 and eb > 0
+    assert la > 1 and lb > 1, "One of the concurrent runs failed to find a path"
+    assert ea > 0 and eb > 0,  "One of the concurrent runs did not expand any nodes"
 

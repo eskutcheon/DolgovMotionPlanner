@@ -1,12 +1,13 @@
 
 import numpy as np
 
-from models import OccupancyGrid, make_rectangle_footprint_offsets, pose_is_free
+from models import OccupancyGrid
 from structs import GridSpec, Pose, VehicleParams
+from utils import make_rectangle_footprint_offsets, pose_is_free
 
 def test_world_grid_roundtrip():
     grid = GridSpec(resolution=1.0, theta_bins=72, origin_xy=(0.0, 0.0))
-    occ = np.zeros((10, 10), dtype=np.bool_)
+    occ = np.zeros((10, 10), dtype=bool)
     og = OccupancyGrid(occ, grid)
     # cell center
     x, y = og.grid_to_world(3, 4)
@@ -16,7 +17,7 @@ def test_world_grid_roundtrip():
 
 def test_out_of_bounds_is_occupied():
     grid = GridSpec(resolution=1.0, theta_bins=72, origin_xy=(0.0, 0.0))
-    occ = np.zeros((5, 5), dtype=np.bool_)
+    occ = np.zeros((5, 5), dtype=bool)
     og = OccupancyGrid(occ, grid)
     assert og.is_occupied(-1, 0) is True
     assert og.is_occupied(0, -1) is True
@@ -35,7 +36,7 @@ def test_make_rectangle_footprint_offsets_shape_and_deterministic():
 
 def test_pose_is_free_reference_point_only():
     grid = GridSpec(resolution=1.0, theta_bins=72)
-    occ = np.zeros((10, 10), dtype=np.bool_)
+    occ = np.zeros((10, 10), dtype=bool)
     occ[4, 3] = True
     og = OccupancyGrid(occ, grid)
     p_free = Pose(1.0, 1.0, 0.0)
@@ -48,7 +49,7 @@ def test_pose_is_free_with_rectangle_sampling_hits_obstacle():
     veh = VehicleParams(width=2.0, front_overhang=1.0, rear_overhang=1.0, wheelbase=2.0)
     offsets = make_rectangle_footprint_offsets(veh, sample_step=0.5)
     grid = GridSpec(resolution=1.0, theta_bins=72)
-    occ = np.zeros((20, 20), dtype=np.bool_)
+    occ = np.zeros((20, 20), dtype=bool)
     og = OccupancyGrid(occ, grid)
     p = Pose(10.0, 10.0, 0.0)
     # Sample a footprint point that is "most forward" in +x for theta=0 for obstacle near the front of the vehicle centered at (10,10)

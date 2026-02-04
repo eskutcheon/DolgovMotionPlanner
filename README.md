@@ -1,15 +1,29 @@
-# Building & Testing (C++ extension)
 
-## Prerequisites
+# Updated Hybrid A* Search for AGV Path Planning with Curvature Constraints
+
+## Overview
+
+DESCRIBE PROJECT, SOURCE, ETC
+
+NOTE: initial version roughly implemented the approach from the 2008 paper without respect to curvature, while updates integrated it properly and made strides to update various aspects for efficiency
+
+
+## Examples
+
+- ADD VISUALIZATIONS AND STUFF HERE
+- LINK TO COMPILED LATEX PDF AS DOCS
+
+
+## Building & Testing (C++ extension)
+
+### Prerequisites
 
 - Python 3.10+
-- A C++ compiler with C++17 support
+- (Optional) A C++ compiler with C++17 support
   - Linux: `g++` or `clang++`
   - Linux (Debian/Ubuntu): `sudo apt-get install build-essential python3-dev`
   - macOS: Xcode Command Line Tools
   - Windows: "Build Tools for Visual Studio" (MSVC)
-
-## Install (dev)
 
 ### Python-first environment setup
 
@@ -55,8 +69,7 @@ pip install -e . -v
 pytest -m cpp
 ```
 
-
-## Troubleshooting
+### Troubleshooting
 
 - **`ImportError: No module named hybrid_core`**
   - The extension wasn’t built. Re-run `python -m pip install -e .`.
@@ -66,3 +79,10 @@ pytest -m cpp
 
 - **Forcing a rebuild**
   - Delete `build/` and any `*.so`/`*.pyd` artifacts (or reinstall in a fresh virtualenv), then rerun `python -m pip install -e .`.
+
+
+
+## Roadmap
+
+- MENTION SUBPAR C++ INTEGRATION AND PLANS TO UPDATE
+- MISC IDEAS FOR IMPROVEMENTS

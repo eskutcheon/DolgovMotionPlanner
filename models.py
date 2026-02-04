@@ -1,26 +1,25 @@
 
-from typing import List, Optional, Tuple, Sequence, Protocol
+from typing import List, Optional, Tuple, Sequence, Dict
 import heapq
 import math
 import numpy as np
+from pathlib import Path
 
 from structs import GridSpec, VehicleParams, Pose, VoronoiParams, DiscreteKey, PlannerConfig
-from utils import TAU, wrap_angle, wrap_angle_2pi
+from utils import TAU, SQRT2, wrap_angle, wrap_angle_2pi, pose_is_free, pose_is_free_cached_cells
 
 
 
 
-# ----------------------------
+
 # Occupancy + distance field
-# ----------------------------
-
 class OccupancyGrid:
     """ Binary occupancy grid in row-major (iy, ix) order - `occ[y, x] == True` means obstacle.
         Important for multi-threading later: treat `occ` as read-only during planning
     """
     def __init__(self, occupied: np.ndarray, grid: GridSpec):
-        if occupied.dtype != np.bool_:
-            occupied = occupied.astype(np.bool_)
+        if occupied.dtype not in (bool, np.bool_):
+            occupied = occupied.astype(bool)
         self.occ: np.ndarray = occupied
         self.grid: GridSpec = grid
         self.height, self.width = occupied.shape
@@ -46,81 +45,29 @@ class OccupancyGrid:
             return True  # treat out-of-bounds as obstacles
         return bool(self.occ[iy, ix])
 
+    @staticmethod
+    def grid_from_file(path: str | Path, grid: GridSpec) -> Tuple['OccupancyGrid', List[float], List[float]]:
+        """ Load a binary occupancy grid from a .npz file """
+        print("maze source file: ", path.stem)
+        occ_dict: Dict[str, np.ndarray] = np.load(path)
+        occ = occ_dict['occupancy']
+        start, goal = occ_dict['poses'].tolist()
+        print("Loaded occupancy grid from", path, "with shape, dtype", occ.shape, occ.dtype)
+        if occ.ndim != 2 or occ.dtype not in (bool, np.bool_, np.uint8):
+            raise ValueError("Occupancy grid must be a 2D boolean array")
+        if int(start[0]) < 0 or int(start[0]) >= occ.shape[1] or int(start[1]) < 0 or int(start[1]) >= occ.shape[0]:
+            raise ValueError("Start pose out of bounds in occupancy grid")
+        if int(goal[0]) < 0 or int(goal[0]) >= occ.shape[1] or int(goal[1]) < 0 or int(goal[1]) >= occ.shape[0]:
+            raise ValueError("Goal pose out of bounds in occupancy grid")
+        # ngl, wish I hadn't written it this way
+        occ = np.pad(occ, pad_width=1, mode='constant', constant_values=1)
+        print("shape before and after: ", occ_dict['occupancy'].shape, "->", occ.shape)
+        occ_grid = OccupancyGrid(occ.astype(bool), grid)
+        return occ_grid, start, goal
 
 
 
-# ----------------------------
-# Collision checking
-# ----------------------------
-
-class CollisionChecker(Protocol):
-    def edge_is_free(self, poses: Sequence[Pose]) -> bool: ...
-
-
-class ReferencePointCollisionChecker:
-    """ Baseline: checks only the center point against occupancy.
-        NOTE: fast, but not footprint-accurate - used for benchmarking baselines
-    """
-    def __init__(self, grid: OccupancyGrid):
-        self.grid = grid
-
-    def edge_is_free(self, poses: Sequence[Pose]) -> bool:
-        for p in poses:
-            ix, iy = self.grid.world_to_grid(p.x, p.y)
-            if self.grid.is_occupied(ix, iy):
-                return False
-        return True
-
-
-
-def compute_distance_to_obstacles_m(occ: np.ndarray, resolution: float) -> np.ndarray:
-    """ dO(x,y): Euclidean distance to nearest obstacle in meters.
-        fast path uses SciPy if available; fallback uses an approximate chamfer distance
-    """
-
-    try:
-        from scipy.ndimage import distance_transform_edt  # type: ignore
-        free = ~occ
-        dist = distance_transform_edt(free).astype(np.float64) * resolution
-        return dist
-    except Exception:
-        # Approximate fallback: multi-pass chamfer-like distance on grid
-        # (Not as accurate as EDT; intended only as a functional baseline.)
-        h, w = occ.shape
-        INF = 1e9
-        dist = np.full((h, w), INF, dtype=np.float64)
-        dist[occ] = 0.0
-        # two-pass 8-neighbor chamfer with costs (1, sqrt(2))
-        c1 = resolution
-        c2 = resolution * math.sqrt(2.0)
-
-        def min_pass(x_iter, y_iter, neighbors):
-            for y in y_iter:
-                for x in x_iter:
-                    # skip any obstacles
-                    if dist[y, x] == 0.0:
-                        continue
-                    best = dist[y, x]
-                    # check each neighbor cell (within boundaries) for possible improvement
-                    for dx, dy, cost in neighbors:
-                        nx, ny = x + dx, y + dy
-                        if 0 <= nx < w and 0 <= ny < h:
-                            best = min(best, dist[ny, nx] + cost)
-                    dist[y, x] = best
-
-        # forward then backward passes
-        fwd_neighbors = ((-1, 0, c1), (0, -1, c1), (-1, -1, c2), (1, -1, c2))
-        min_pass(range(w), range(h), fwd_neighbors)
-        bwd_neighbors = ((1, 0, c1), (0, 1, c1), (1, 1, c2), (-1, 1, c2))
-        min_pass(range(w - 1, -1, -1), range(h - 1, -1, -1), bwd_neighbors)
-        return dist
-
-
-# ----------------------------
 # Voronoi Field (paper Eq. 1)
-# ----------------------------
-
-
 class VoronoiField:
     """ $rho_V(x,y)$ shaped by distance-to-obstacles (and optionally GVD distance).
         This follows the same structure as Dolgov et al. (AAAI 2008):
@@ -134,6 +81,7 @@ class VoronoiField:
         self.dV = dV_m.astype(np.float64, copy=False) if dV_m is not None else None
         self.params = params
 
+    # TODO: consider decorating this function with @property to cache the result
     def rho(self) -> np.ndarray:
         """ Vectorized potential in [0,1] on the grid.
             NOTE: If $dV$ is not available, proxy it with $dV := dO$ (keeps a weak "skeleton-ish" scaling effect)
@@ -150,101 +98,54 @@ class VoronoiField:
         return np.clip(rho, 0.0, 1.0).astype(np.float64, copy=False)
 
 
-# ----------------------------
-# Collision: rectangle footprint sampled in vehicle frame
-# ----------------------------
-
-def make_rectangle_footprint_offsets(vehicle: VehicleParams, sample_step: float) -> np.ndarray:
-    """ Return an (N,2) array of (dx,dy) offsets in the vehicle frame.
-        Frame convention:
-            - origin at rear axle center
-            - +x forward, +y left
-            - rectangle spans:
-                x in [-rear_overhang, wheelbase + front_overhang]
-                y in [-width/2, +width/2]
-
-        We sample the *interior* of the rectangle on a regular lattice. This is simple and robust on occupancy grids.
-    """
-    step = float(sample_step)
-    if step <= 0.0:
-        raise ValueError("sample_step must be > 0")
-    # rectangle bounds
-    x0 = -float(vehicle.rear_overhang)
-    x1 = float(vehicle.wheelbase + vehicle.front_overhang)
-    y0 = -0.5 * float(vehicle.width)
-    y1 = +0.5 * float(vehicle.width)
-    # generate grid of points to sample
-    xs = np.arange(x0, x1 + 1e-9, step, dtype=np.float64)
-    ys = np.arange(y0, y1 + 1e-9, step, dtype=np.float64)
-    X, Y = np.meshgrid(xs, ys, indexing="xy")
-    pts = np.stack([X.ravel(), Y.ravel()], axis=1)
-    return np.ascontiguousarray(pts, dtype=np.float64)
 
 
-def pose_is_free(p: Pose, grid: OccupancyGrid, footprint_offsets: Optional[np.ndarray]) -> bool:
-    """ Check collision of a pose against the occupancy grid.
-        If `footprint_offsets` is None, checks only the reference point.
-        Otherwise, checks all transformed offsets.
-    """
-    ox, oy = grid.grid.origin_xy
-    res = float(grid.grid.resolution)
-    # fast path: reference point only
-    if footprint_offsets is None:
-        ix = int(math.floor((p.x - ox) / res))
-        iy = int(math.floor((p.y - oy) / res))
-        return not grid.is_occupied(ix, iy)
-    c = math.cos(p.theta)
-    s = math.sin(p.theta)
-    occ = grid.occ
-    H, W = occ.shape
-    # Tight loop: avoid calling back into grid methods.
-    for dx, dy in footprint_offsets:
-        x = p.x + c * float(dx) - s * float(dy)
-        y = p.y + s * float(dx) + c * float(dy)
-        ix = int(math.floor((x - ox) / res))
-        iy = int(math.floor((y - oy) / res))
-        if ix < 0 or ix >= W or iy < 0 or iy >= H:
-            return False
-        if occ[iy, ix]:
-            return False
-    return True
-
-
-# ----------------------------
 # Discretization utilities
-# ----------------------------
+# TODO: move to utils?
+def kappa_to_bin(kappa: float, kappa_min: float, kappa_max: float, dkappa: float, kappa_bins: int) -> int:
+    """ Map curvature to bin index """
+    k = max(kappa_min, min(kappa_max, kappa))
+    bin_idx = int(math.floor((k - kappa_min) / dkappa))
+    return min(max(bin_idx, 0), kappa_bins - 1)
+
+
+#? NOTE: both heuristic model classes have repeated use of some of the same discretization methods and may as well use a shared Indexer class
+
 
 class Indexer:
     """ Discretizes (x,y,theta,dir) and provides a flat index for best-g arrays """
-
-    def __init__(self, grid: OccupancyGrid):
+    def __init__(self, grid: OccupancyGrid, *, kappa_bins: Optional[int] = None, kappa_max: Optional[float] = None):
         self.grid = grid
         self.W = int(grid.width)
         self.H = int(grid.height)
         self.theta_bins = int(grid.grid.theta_bins)
         self.dtheta = TAU / float(self.theta_bins)
+        #& UPDATE: adding curvature parameters for the new discretization functions
+        self.kappa_bins = int(kappa_bins or grid.grid.kappa_bins)
+        self.kappa_max = float(kappa_max or grid.grid.kappa_max)
+        self.kappa_min = -self.kappa_max        # placeholder; should be set from PlannerConfig
+        self.dkappa = (self.kappa_max - self.kappa_min) / self.kappa_bins
 
-    def theta_to_bin(self, theta: float) -> int:
+    def _theta_to_bin(self, theta: float) -> int:
+        """ Map heading to bin index """
         t = wrap_angle_2pi(theta)
-        k = int(math.floor(t / self.dtheta)) % self.theta_bins
-        return k
+        return int(math.floor(t / self.dtheta)) % self.theta_bins
 
-    @staticmethod
-    def dir_to_index(direction: int) -> int:
-        return 0 if direction >= 0 else 1
+    #& UPDATE: modifying functions below to use curvature, not direction
+    #&#############################################################################################
 
-    def pose_to_key(self, pose: Pose, direction: int) -> DiscreteKey:
+    # TODO: should remove the direction argument but for now I'm just giving it a default to put off more changes
+    def pose_to_key(self, pose: Pose, direction: int = None) -> DiscreteKey:
         ix, iy = self.grid.world_to_grid(pose.x, pose.y)
-        itheta = self.theta_to_bin(pose.theta)
-        return DiscreteKey(ix=ix, iy=iy, itheta=itheta, direction=1 if direction >= 0 else -1)
+        itheta = self._theta_to_bin(pose.theta)
+        ikappa = kappa_to_bin(pose.kappa, self.kappa_min, self.kappa_max, self.dkappa, self.kappa_bins)
+        return DiscreteKey(ix=ix, iy=iy, itheta=itheta, ikappa=ikappa) #direction=1 if direction >= 0 else -1)
 
     def key_to_flat(self, key: DiscreteKey) -> int:
-        return self.flat_index(key.ix, key.iy, key.itheta, key.direction)
+        """ return flat packed index for best-g arrays """
+        return int((((key.iy * self.W + key.ix) * self.theta_bins + key.itheta) * self.kappa_bins + key.ikappa))
 
-    def flat_index(self, ix: int, iy: int, itheta: int, direction: int) -> int:
-        idir = self.dir_to_index(direction)
-        # Layout matches the C++ kernel: [H,W,theta_bins,2]
-        return int((((iy * self.W + ix) * self.theta_bins + itheta) * 2 + idir))
+    #&#############################################################################################
 
 
 # ----------------------------
@@ -255,52 +156,82 @@ class BicycleModel:
     def __init__(self, vehicle: VehicleParams):
         self.L = float(vehicle.wheelbase)
 
-    def propagate(self, pose: Pose, steer: float, direction: int, ds: float) -> Pose:
-        """ Constant steer over distance ds (signed by direction) """
+    #& UPDATE: modified propagation approach to use curvature instead of steering angle
+    def propagate(self, pose: Pose, u: float, direction: int, ds: float, *, kappa_max: float) -> Pose:
+        """ Propagate the bicycle model for distance $ds$ with curvature-rate $u$ and direction (+1 forward, -1 reverse)
+            new system parameters:
+                $u  =  d\kappa / ds$
+                $d\theta / ds  =  \sigma \kappa$
+                $dx / ds  =  \sigma \cos(\theta)$
+                $dy / ds  =  \sigma \sin(\theta)$
+        """
         sigma = 1.0 if direction >= 0 else -1.0
-        kappa = math.tan(float(steer)) / self.L
         x0, y0, th0 = pose.x, pose.y, pose.theta
-        # if kappa is near 0, it's a straight line; else circular arc
-        if abs(kappa) < 1e-9:
-            x1 = x0 + sigma * ds * math.cos(th0)
-            y1 = y0 + sigma * ds * math.sin(th0)
-            th1 = th0
-        else:
-            dth = sigma * ds * kappa
-            th1 = wrap_angle(th0 + dth)
-            R = 1.0 / kappa
-            x1 = x0 + sigma * (math.sin(th1) - math.sin(th0)) * R
-            y1 = y0 - sigma * (math.cos(th1) - math.cos(th0)) * R
-        return Pose(x=x1, y=y1, theta=th1)
+        # kappa = math.tan(float(steer)) / self.L
+        k0 = float(pose.kappa)
+        k1 = max(-kappa_max, min(kappa_max, k0 + float(u) * float(ds)))
+        # midpoint integration (stable and cheap)
+        # TODO: explore other numerical integration methods like trapezoidal, RK4, or modern quadrature methods later
+        km = 0.5 * (k0 + k1)
+        thm = th0 + 0.5 * sigma * km * ds
+        x1 = x0 + sigma * ds * math.cos(thm)
+        y1 = y0 + sigma * ds * math.sin(thm)
+        th1 = wrap_angle(th0 + sigma * km * ds)
+        return Pose(x=x1, y=y1, theta=th1, kappa=k1)
 
-    def rollout_end_if_free(
+
+    def rollout(
         self,
         pose: Pose,
-        steer: float,
+        # steer: float,
+        u: float,
         direction: int,
         ds: float,
         n_substeps: int,
+        kappa_max: float,
         grid: OccupancyGrid,
         footprint_offsets: Optional[np.ndarray],
-    ) -> Optional[Pose]:
-        """ Propagate and collision-check along the edge. Returns the endpoint Pose if collision-free, else None. """
+        *,
+        dO_m: Optional[np.ndarray] = None,
+        gate_radius_m: float = 0.0,
+        exact_check_margin_m: float = 0.0,
+        footprint_cache: Optional[Sequence[np.ndarray]] = None,
+        theta_bins: int = 0,
+        rho: Optional[np.ndarray] = None,
+    ) -> Optional[Tuple[Pose, float]]: # ) -> Optional[Pose]:
+        """ Propagate + collision-check along the edge; returns (endpoint, $\int \rho ds$) if collision-free else None. """
+        #& UPDATE: added curvature parameters to the function signature above, which now returns a tuple of (Pose, float) or None
         step = float(ds) / float(n_substeps)
         cur = pose
+        dtheta = TAU / float(theta_bins) if theta_bins > 0 else 0.0
+        rho_int = 0.0
         for _ in range(int(n_substeps)):
-            cur = self.propagate(cur, steer, direction, step)
-            if not pose_is_free(cur, grid, footprint_offsets):
+            cur = self.propagate(cur, u, direction, step, kappa_max = kappa_max)
+            # compute grid cell indices
+            ix, iy = grid.world_to_grid(cur.x, cur.y)
+            if not grid.in_bounds(ix, iy):
                 return None
-        return cur
+            # TODO: would prefer to use memoization through functools rather than explicitly handling footprint_cache here
+            # conservative distance-transform checkpoint: if reference point has enough clearance, accept immediately
+            if (dO_m is None) or (gate_radius_m <= 0.0) or (float(dO_m[iy, ix]) < float(gate_radius_m)):
+                # Use cached footprint when not extremely tight; fall back to exact footprint near obstacles.
+                if (
+                    footprint_cache is not None
+                    and theta_bins > 0
+                    and dO_m is not None
+                    and float(dO_m[iy, ix]) >= float(gate_radius_m) + float(exact_check_margin_m)
+                ):
+                    it = int(math.floor(wrap_angle_2pi(cur.theta) / dtheta)) % int(theta_bins)
+                    if not pose_is_free_cached_cells(cur, grid, footprint_cache[it]):
+                        return None
+                else:
+                    if not pose_is_free(cur, grid, footprint_offsets):
+                        return None
+            # integrate Voronoi cost if available
+            if rho is not None:
+                rho_int += float(rho[iy, ix]) * step
+        return cur, float(rho_int)
 
-    def rollout(self, pose: Pose, steer: float, direction: int, ds: float, n: int) -> List[Pose]:
-        """ Return intermediate poses including endpoint (debug/visualization) """
-        out: List[Pose] = []
-        step = float(ds) / float(n)
-        cur = pose
-        for _ in range(int(n)):
-            cur = self.propagate(cur, steer, direction, step)
-            out.append(cur)
-        return out
 
 
 # ----------------------------
@@ -309,66 +240,102 @@ class BicycleModel:
 
 class HolonomicWithObstacles2D:
     """ 2D Dijkstra cost-to-go map on the grid, ignoring non-holonomy; paper uses this to detect U-shaped obstacles/dead-ends """
-    def __init__(self, grid: OccupancyGrid, cost_per_cell: Optional[np.ndarray] = None):
+    def __init__(self, grid: OccupancyGrid, cost_per_cell: Optional[np.ndarray] = None,
+                 dO_m: Optional[np.ndarray] = None, min_clearance_m: float = 0.0):
         self.grid = grid
         self.cost_per_cell = cost_per_cell      # optional additional per-cell cost (e.g., Voronoi rho)
-        self._dist: Optional[np.ndarray] = None # computed per goal
+        # self._dist: Optional[np.ndarray] = None # computed per goal
+        self._dist: Optional[np.ndarray] = None      # [h,w]
+        self._done: Optional[np.ndarray] = None      # [h,w] settled flags
+        self._pq: List[Tuple[float, int, int]] = []  # heap for lazy Dijkstra
+        self._nbrs = None
+        self._dO = dO_m
+        self._min_clear = float(min_clearance_m)
+
 
     def compute(self, goal: Pose) -> None:
         w, h = self.grid.width, self.grid.height
-        dist = np.full((h, w), np.inf, dtype=np.float64)
+        dist = np.full((h, w), np.inf, dtype=np.float64) # NOTE: needs to stay float64 for heapq comparisons
+        done = np.zeros((h, w), dtype=bool)
         gx, gy = self.grid.world_to_grid(goal.x, goal.y)
         # goal in obstacle => heuristic is unusable; keep inf and fallback at query-time
         if not self.grid.in_bounds(gx, gy) or self.grid.is_occupied(gx, gy):
             self._dist = dist
+            self._done = done
+            self._pq = []
             return
         c1 = float(self.grid.grid.resolution)
-        c2 = c1 * math.sqrt(2.0)
-        nbrs = ((-1, 0, c1), (1, 0, c1), (0, -1, c1), (0, 1, c1), (-1, -1, c2), (-1, 1, c2), (1, -1, c2), (1, 1, c2))
+        c2 = c1 * SQRT2
+        self._nbrs = ((-1, 0, c1), (1, 0, c1), (0, -1, c1), (0, 1, c1), (-1, -1, c2), (-1, 1, c2), (1, -1, c2), (1, 1, c2))
         pq: List[Tuple[float, int, int]] = []
         dist[gy, gx] = 0.0
         heapq.heappush(pq, (0.0, gx, gy))
-        while pq:
-            d, x, y = heapq.heappop(pq)
-            if d != dist[y, x]:
-                continue
-            for dx, dy, step in nbrs:
-                nx, ny = x + dx, y + dy
-                # if not self.grid.in_bounds(nx, ny) or self.grid.is_occupied(nx, ny):
-                if self.grid.is_occupied(nx, ny): # `is_occupied` also checks bounds and treats out-of-bounds cells as obstacles
-                    continue
-                extra = 0.0
-                if self.cost_per_cell is not None:
-                    extra = float(self.cost_per_cell[ny, nx])
-                nd = d + step * (1.0 + extra)
-                if nd < dist[ny, nx]:
-                    dist[ny, nx] = nd
-                    heapq.heappush(pq, (nd, nx, ny))
+        #& UPDATE: `compute` now just initializes the model while `__call__` internally calls `_ensure_settled` to loop over pq and lazily settle nodes
         self._dist = dist
+        self._done = done
+        self._pq = pq
+
+
+    def _ensure_settled(self, tx: int, ty: int) -> None:
+        if self._dist is None or self._done is None or self._nbrs is None:
+            # print("HolonomicWithObstacles2D: compute() must be called before _ensure_settled()")
+            return
+        if not self.grid.in_bounds(tx, ty) or self._done[ty, tx]:
+            # print("HolonomicWithObstacles2D: target cell already settled or out of bounds: ", tx, ty)
+            return
+        while self._pq:
+            d, x, y = heapq.heappop(self._pq)
+            if self._done[y, x] or d > self._dist[y, x] + 1e-6:
+                continue
+            self._done[y, x] = True
+            for dx, dy, step in self._nbrs:
+                nx, ny = x + dx, y + dy
+                # TODO: create small helpers for this and other long conditional chains
+                if self.grid.is_occupied(nx, ny) or (self._dO is not None and self._min_clear > 0.0 and float(self._dO[ny, nx]) < self._min_clear):
+                    continue
+                extra = float(self.cost_per_cell[ny, nx]) if self.cost_per_cell is not None else 0.0
+                nd = d + step * (1.0 + extra)
+                if nd < self._dist[ny, nx]:
+                    self._dist[ny, nx] = nd
+                    heapq.heappush(self._pq, (nd, nx, ny))
+            # after relaxing neighbors, check if we settled the target cell (must come after or relaxation never happens when the first query is the goal)
+            if x == tx and y == ty:
+                return
+
+    def __call__(self, pose: Pose) -> float:
+        if self._dist is None:
+            # print("HolonomicWithObstacles2D: compute() must be called before __call__()")
+            return float("inf") # 0.0
+        ix, iy = self.grid.world_to_grid(pose.x, pose.y)
+        if not self.grid.in_bounds(ix, iy):
+            # print("HolonomicWithObstacles2D: query out of bounds: ", ix, iy)
+            return float("inf")
+        self._ensure_settled(ix, iy)
+        if self._done is not None and not self._done[iy, ix]:
+            # print("HolonomicWithObstacles2D: cell not settled after _ensure_settled(): ", ix, iy)
+            return float("inf")
+        # print("values of self._dist that are non-inf: ", self._dist[self._dist < float("inf")])
+        return float(self._dist[iy, ix])
 
     def cpp_view(self) -> np.ndarray:
         if self._dist is None:
             raise RuntimeError("compute() must be called before cpp_view()")
         return np.ascontiguousarray(self._dist, dtype=np.float64)
 
-    def __call__(self, pose: Pose) -> float:
-        if self._dist is None:
-            return 0.0
-        ix, iy = self.grid.world_to_grid(pose.x, pose.y)
-        if not self.grid.in_bounds(ix, iy):
-            return float("inf")
-        return float(self._dist[iy, ix])
 
 
+# TODO: replace bits and pieces of these classes with new Spec classes instead of passing so much
 class NonHolonomicWithoutObstaclesTable:
     """ Goal-local heuristic table over (x, y, theta), ignoring obstacles - implements Dijkstra over a small goal-centered grid in goal frame
         - paper computes shortest path to (0,0,0) in a neighborhood, offline
     """
     def __init__(self, config: PlannerConfig):
         self.cfg = config
-        self._table: Optional[np.ndarray] = None  # [iy, ix, itheta]
-        # PREVIOUSLY: (radius, res, theta_bins_local)
-        self._meta: Optional[Tuple[float, float, int, float, int]] = None  # (R, res, theta_bins, dth, nxy)
+        #& UPDATE: modified table and meta to include curvature dimension
+        self._table: Optional[np.ndarray] = None  # [iy, ix, itheta, ikappa]
+        # self._meta: Optional[Tuple[float, float, int, float, int]] = None  # (R, res, theta_bins, dth, nxy)
+        #& UPDATE: self._meta now holds (R, res, theta_bins, dth, nxy, kappa_bins, kappa_max, dkappa)
+        self._meta: Optional[Tuple[float, float, int, float, int, int, float, float]] = None
 
     def build_offline(self) -> None:
         R = float(self.cfg.nonholonomic_table_xy_radius)
@@ -380,6 +347,9 @@ class NonHolonomicWithoutObstaclesTable:
             nxy += 1
         theta_bins = int(round(TAU / dth))
         dth = TAU / float(theta_bins)
+        kappa_bins = int(self.cfg.kappa_bins)
+        kappa_max = float(self.cfg.kappa_max)
+        dkappa = (2.0 * kappa_max) / float(kappa_bins)
 
         def idx_to_xy(ix: int, iy: int) -> Tuple[float, float]:
             """ index <-> coordinate in goal frame """
@@ -387,55 +357,71 @@ class NonHolonomicWithoutObstaclesTable:
             y = (iy - nxy // 2) * res
             return x, y
 
-        table = np.full((nxy, nxy, theta_bins), np.inf, dtype=np.float64)
+        table = np.full((nxy, nxy, theta_bins, kappa_bins), np.inf, dtype=np.float64)
         # Motion primitives (same as search): constant steering for one step_size in LOCAL metric
         #? NOTE: ds should align to res for table consistency; we use res here.
         model = BicycleModel(self.cfg.vehicle)
-        steer_set = self._steer_set()
-        # Goal at center cell, theta=0
+        #& UPDATE: changed use of steering set to curvature rate set (using new _u_set in place of _steer_set)
+        # steer_set = self._steer_set()
+        u_set = self._u_set()
+        # Goal at center cell, theta=0, kappa=0
         gx = nxy // 2
         gy = nxy // 2
-        gk = 0
-        table[gy, gx, gk] = 0.0
-        pq: List[Tuple[float, int, int, int]] = [(0.0, gx, gy, gk)]
+        gt = 0
+        gk = int(round(kappa_max / dkappa))
+        table[gy, gx, gt, gk] = 0.0
+        pq: List[Tuple[float, int, int, int, int]] = [(0.0, gx, gy, gt, gk)]
         heapq.heapify(pq)
         # Run Dijkstra outward by applying REVERSE dynamics. Instead of inverting bicycle exactly, we approximate by applying forward
             # primitives from each state and relaxing neighbors (works since costs are symmetric-ish for the obstacle-free heuristic)
         while pq:
-            d, ix, iy, it = heapq.heappop(pq)
-            if d != table[iy, ix, it]:
+            d, ix, iy, it, ik = heapq.heappop(pq)
+            if d != table[iy, ix, it, ik]:
                 continue
             x, y = idx_to_xy(ix, iy)
             th = wrap_angle(it * dth)
-            cur = Pose(x=x, y=y, theta=th)
+            kappa = -kappa_max + (ik + 0.5) * dkappa
+            cur = Pose(x=x, y=y, theta=th, kappa=kappa)
             # expand neighbors and relax costs
             for direction in (+1, -1): # include reverse in heuristic table
-                for steer in steer_set:
-                    nxt = model.propagate(cur, steer, direction, res)
+                # for steer in steer_set:
+                #     nxt = model.propagate(cur, steer, direction, res)
+                for u in u_set:
+                    nxt = model.propagate(cur, u, direction, res, kappa_max = kappa_max)
+                    # map nxt to table indices
+                    # TODO: rename to ix_next, etc. for better clarity
                     nix = int(round(nxt.x / res)) + nxy // 2
                     niy = int(round(nxt.y / res)) + nxy // 2
                     if not (0 <= nix < nxy and 0 <= niy < nxy):
                         continue
+                    # TODO: replace with some global theta_to_bin method later
                     nit = int(math.floor(wrap_angle_2pi(nxt.theta) / dth)) % theta_bins
+                    nik = kappa_to_bin(nxt.kappa, -kappa_max, kappa_max, dkappa, kappa_bins)
                     # small reverse penalty in heuristic can be set to 0 for admissibility as in this case
                     nd = d + res
-                    if nd < table[niy, nix, nit]:
-                        table[niy, nix, nit] = nd
-                        heapq.heappush(pq, (nd, nix, niy, nit))
+                    if nd < table[niy, nix, nit, nik]:
+                        table[niy, nix, nit, nik] = nd
+                        heapq.heappush(pq, (nd, nix, niy, nit, nik))
         self._table = table
-        self._meta = (R, res, theta_bins, dth, nxy)
+        self._meta = (R, res, theta_bins, dth, nxy, kappa_bins, kappa_max, dkappa)
 
-    def _steer_set(self) -> List[float]:
-        m = int(self.cfg.steering_samples)
-        max_steer = float(self.cfg.vehicle.max_steer)
+
+    def _u_set(self) -> List[float]:
+        m = int(self.cfg.kappa_rate_samples)
+        u_max = float(self.cfg.kappa_rate_max)
+        if m <= 1:
+            return [0.0]
         # return symmetric samples including 0
-        return np.linspace(-max_steer, max_steer, m, dtype=np.float64).tolist()
+        return np.linspace(-u_max, u_max, m, dtype=np.float64).tolist()
+
 
     def cpp_view(self) -> Tuple[np.ndarray, float, float, float, int, int]:
         """ Return contiguous table and metadata for the C++ kernel """
         if self._table is None or self._meta is None:
             raise RuntimeError("build_offline() must be called before cpp_view()")
-        R, res, theta_bins, dth, nxy = self._meta
+        # R, res, theta_bins, dth, nxy = self._meta
+        #!!! FIXME: C++ backend not updated to use curvature dimension yet
+        R, res, theta_bins, dth, nxy, kappa_bins, kappa_max, dkappa = self._meta
         table = np.ascontiguousarray(self._table, dtype=np.float64)
         return table, float(R), float(res), float(dth), int(nxy), int(theta_bins)
 
@@ -444,14 +430,10 @@ class NonHolonomicWithoutObstaclesTable:
         if self._table is None or self._meta is None:
             dx, dy = pose.x - goal.x, pose.y - goal.y
             return math.hypot(dx, dy)
-        R, res, theta_bins, dth, nxy = self._meta
+        R, res, theta_bins, dth, nxy, kappa_bins, kappa_max, dkappa = self._meta
         dx = pose.x - goal.x
         dy = pose.y - goal.y
-        # Rotate into goal frame: R(-theta_g) * (pose - goal)
-        # RgT = rot2d(-goal.theta)
-        # v = np.array([pose.x - goal.x, pose.y - goal.y], dtype=np.float64)
-        # xl, yl = RgT @ v
-        # UPDATE: removed numpy overhead in favor of explicit rotation matrix application
+        # UPDATE: removed numpy overhead in favor of explicit rotation matrix multiplication with vector $(\Delta x, \Delta y)$
         cg = math.cos(goal.theta)
         sg = math.sin(goal.theta)
         xl = cg * dx + sg * dy
@@ -462,7 +444,8 @@ class NonHolonomicWithoutObstaclesTable:
         iy = int(round(yl / res)) + nxy // 2
         thl = wrap_angle(pose.theta - goal.theta)
         it = int(math.floor(wrap_angle_2pi(thl) / dth)) % theta_bins
-        val = float(self._table[iy, ix, it])
+        ik = kappa_to_bin(float(pose.kappa - goal.kappa), -kappa_max, kappa_max, dkappa, kappa_bins)
+        val = float(self._table[iy, ix, it, ik])
         if not math.isfinite(val):
             return math.hypot(xl, yl)
         return val
