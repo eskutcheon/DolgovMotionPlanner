@@ -1,8 +1,8 @@
 
 import math
 
-from models import BicycleModel
-from structs import Pose, VehicleParams
+from src.models import BicycleModel
+from src.structs import Pose, VehicleParams
 
 
 def test_bicycle_propagate_straight_line():

@@ -5,7 +5,7 @@ import math
 import numpy as np
 
 if TYPE_CHECKING:
-    from models import OccupancyGrid, Pose
+    from src.models import OccupancyGrid, Pose
 
 
 

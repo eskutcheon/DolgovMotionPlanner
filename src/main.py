@@ -14,9 +14,9 @@
 import math
 import numpy as np
 # local module imports
-from structs import GridSpec, VehicleParams, Pose, GoalSpec, PlannerConfig #, PlannerStats, PlannerTick, TickCallback
-from models import OccupancyGrid
-from planners import planner_factory
+from src.structs import GridSpec, VehicleParams, Pose, GoalSpec, PlannerConfig #, PlannerStats, PlannerTick, TickCallback
+from src.models import OccupancyGrid
+from src.planners import planner_factory
 
 
 

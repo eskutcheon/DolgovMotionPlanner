@@ -1,9 +1,9 @@
 
 import numpy as np
 
-from models import OccupancyGrid
-from structs import GridSpec, Pose, VehicleParams
-from utils import make_rectangle_footprint_offsets, pose_is_free
+from src.models import OccupancyGrid
+from src.structs import GridSpec, Pose, VehicleParams
+from src.utils import make_rectangle_footprint_offsets, pose_is_free
 
 def test_world_grid_roundtrip():
     grid = GridSpec(resolution=1.0, theta_bins=72, origin_xy=(0.0, 0.0))

@@ -9,8 +9,8 @@
 from typing import List, Optional, Tuple
 import numpy as np
 # local module imports
-from structs import Pose, GoalSpec, PlannerConfig, PlannerStats
-from models import OccupancyGrid
+from src.structs import Pose, GoalSpec, PlannerConfig, PlannerStats
+from src.models import OccupancyGrid
 
 try:
     import hybrid_core  # type: ignore

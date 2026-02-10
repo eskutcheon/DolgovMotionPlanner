@@ -5,10 +5,10 @@ import numpy as np
 np.set_printoptions(precision=3, suppress=True, threshold=100000)
 import pytest
 # local module imports
-from structs import Pose, GoalSpec
+from src.structs import Pose, GoalSpec
 # from models import OccupancyGrid
-from utils import pose_is_free
-from planners import planner_factory
+from src.utils import pose_is_free
+from src.planners import planner_factory
 
 
 def _reached(p: Pose, goal: Pose, pos_tol: float, th_tol: float) -> bool:
@@ -35,7 +35,7 @@ def test_python_backend_finds_path_on_empty_map(empty_grid, planner_config, star
 
 
 def test_python_backend_returns_empty_if_start_in_obstacle(grid_spec, planner_config, goal_spec):
-    from models import OccupancyGrid
+    from src.models import OccupancyGrid
     occ = np.zeros((20, 20), dtype=bool)
     occ[5, 5] = True
     grid = OccupancyGrid(occ, grid_spec)

@@ -6,17 +6,17 @@ import heapq
 import time
 import numpy as np
 # local module imports
-from structs import Pose, GoalSpec, PlannerStats, HybridNode, PlannerConfig, DiscreteKey #, PlannerTick, TickCallback
-from models import (
+from src.structs import Pose, GoalSpec, PlannerStats, HybridNode, PlannerConfig, DiscreteKey #, PlannerTick, TickCallback
+from src.models import (
     OccupancyGrid, Indexer, BicycleModel, VoronoiField, HolonomicWithObstacles2D, NonHolonomicWithoutObstaclesTable,
 )
-from utils import (
+from src.utils import (
     SQRT2, wrap_angle, pose_is_free, compute_distance_to_obstacles_m, make_rectangle_footprint_offsets,
     rectangle_circumscribed_radius, build_orientation_binned_footprint_cache
 )
 
 try:
-    from cpp_kernels import run_search_cpp, CPP_AVAILABLE
+    from src.cpp_kernels import run_search_cpp, CPP_AVAILABLE
 except Exception:  # pragma: no cover
     CPP_AVAILABLE = False
     run_search_cpp = None  # type: ignore

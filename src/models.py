@@ -5,8 +5,8 @@ import math
 import numpy as np
 from pathlib import Path
 
-from structs import GridSpec, VehicleParams, Pose, DiscreteKey, PlannerConfig
-from utils import TAU, SQRT2, wrap_angle, wrap_angle_2pi, pose_is_free, pose_is_free_cached_cells
+from src.structs import GridSpec, VehicleParams, Pose, DiscreteKey, PlannerConfig
+from src.utils import TAU, SQRT2, wrap_angle, wrap_angle_2pi, pose_is_free, pose_is_free_cached_cells
 
 
 

@@ -51,12 +51,12 @@ def test_cpp_backend_planner_smoke(empty_grid, planner_config, start_pose, goal_
     if not hasattr(hybrid_core, "run_search"):
         pytest.skip("hybrid_core does not expose run_search in this build")
     try:
-        from cpp_kernels import CPP_AVAILABLE
+        from src.cpp_kernels import CPP_AVAILABLE
     except Exception:
         pytest.skip("cpp_kernels import failed")
     if not CPP_AVAILABLE:
         pytest.skip("C++ backend not available")
-    from planners import HybridAStarPlannerCpp
+    from src.planners import HybridAStarPlannerCpp
 
     planner_cpp = HybridAStarPlannerCpp(empty_grid, planner_config)
     path_cpp, stats_cpp = planner_cpp.plan(start_pose, goal_spec, max_expansions=50_000)

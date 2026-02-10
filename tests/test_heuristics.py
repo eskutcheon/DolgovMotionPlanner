@@ -4,13 +4,13 @@ import math
 
 import numpy as np
 
-from models import (
+from src.models import (
     HolonomicWithObstacles2D,
     NonHolonomicWithoutObstaclesTable,
     OccupancyGrid,
 )
-from structs import GridSpec, PlannerConfig, VehicleParams, Pose
-from utils import compute_distance_to_obstacles_m
+from src.structs import GridSpec, PlannerConfig, VehicleParams, Pose
+from src.utils import compute_distance_to_obstacles_m
 
 
 def test_distance_to_obstacles_zero_on_obstacles():
