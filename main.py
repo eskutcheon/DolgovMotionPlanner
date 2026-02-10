@@ -24,7 +24,7 @@ def plan_example(backend: str = "python") -> None:
     # Toy map (mostly empty) with a thin vertical obstacle.
     occ = np.zeros((200, 200), dtype=bool)
     occ[80:120, 100] = True
-    grid = GridSpec(resolution=0.5, theta_bins=72, origin_xy=(0.0, 0.0), kappa_bins=36)
+    grid = GridSpec(resolution=0.5, theta_bins=36, origin_xy=(0.0, 0.0), kappa_bins=11)
     og = OccupancyGrid(occ, grid)
     print("grid created: ", grid)
     cfg = PlannerConfig(grid=grid, vehicle=VehicleParams())

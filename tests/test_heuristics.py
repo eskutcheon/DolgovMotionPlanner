@@ -22,7 +22,7 @@ def test_distance_to_obstacles_zero_on_obstacles():
 
 
 def test_holonomic_heuristic_on_empty_grid_has_reasonable_values():
-    grid = GridSpec(resolution=1.0, theta_bins=72, kappa_bins=36)
+    grid = GridSpec(resolution=1.0, theta_bins=36, kappa_bins=11)
     occ = np.zeros((20, 20), dtype=bool)
     og = OccupancyGrid(occ, grid)
     h2d = HolonomicWithObstacles2D(og)
@@ -38,13 +38,13 @@ def test_holonomic_heuristic_on_empty_grid_has_reasonable_values():
 
 def test_nonholonomic_table_zero_at_goal_and_euclidean_far():
     cfg = PlannerConfig(
-        grid=GridSpec(resolution=1.0, theta_bins=72, kappa_bins=36),
+        grid=GridSpec(resolution=1.0, theta_bins=36, kappa_bins=11),
         vehicle=VehicleParams(),
         # steering_samples=5,
         kappa_rate_samples=5,
-        nonholonomic_table_xy_radius=6.0,
-        nonholonomic_table_xy_res=1.0,
-        nonholonomic_table_theta_res=math.radians(15.0),
+        nh_table_xy_radius=6.0,
+        nh_table_xy_res=1.0,
+        nh_table_theta_res=math.radians(15.0),
     )
     nh = NonHolonomicWithoutObstaclesTable(cfg)
     nh.build_offline()

@@ -1,7 +1,11 @@
 
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict, field
 from typing import Callable, Optional, Tuple
 import math
+
+
+
+# TODO: add more accessor helper methods to be used throughout the rest of the pipeline (e.g. like `Pose.as_tuple` or `GridSpec.to_dict`)
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,14 +33,12 @@ class Pose:
 # configurations into a single object to access things like tolerances, vehicle params, grid specs, general Boolean-valued settings, etc
     # I'd keep the separate lower-level structs for the most part but have a top-level `ExperimentConfig` or similar that holds instances of each
 # A ton of these values are basically global constants, e.g. `GoalSpec` variable tolerances, `VehicleParams` physical dimensions,
-    # `GridSpec` discretization settings, `PlannerWeights`, `VoronoiParams`.
+    # `GridSpec` discretization settings, `PlannerWeights`
     # This was essentially meant to be the functionality of `PlannerConfig`, but that class has become more of a grab-bag of settings
         # rather than a clean config object, and the Planners and Heuristic classes don't properly reference that single object or
         # even save copies of relevant variables in some cases
 """
 
-# TODO: check if I can add validation for ranges and types in a `__post_init__` to frozen dataclasses
-    # OR I just have to set variables with `dataclasses.field` with type validators
 
 @dataclass(frozen=True, slots=True)
 class GoalSpec:
@@ -47,15 +49,26 @@ class GoalSpec:
     kappa_tol: float = 0.1    # 1/meters
     # kappa_goal: Optional[float] = None  # desired goal curvature (if any)
 
+    def __post_init__(self) -> None:
+        if float(self.pos_tol) < 0.0:
+            raise ValueError("GoalSpec.pos_tol must be >= 0")
+        if float(self.theta_tol) < 0.0:
+            raise ValueError("GoalSpec.theta_tol must be >= 0")
+        if float(self.kappa_tol) < 0.0:
+            raise ValueError("GoalSpec.kappa_tol must be >= 0")
+        object.__setattr__(self, "pos_tol", float(self.pos_tol))
+        object.__setattr__(self, "theta_tol", float(self.theta_tol))
+        object.__setattr__(self, "kappa_tol", float(self.kappa_tol))
 
-# TODO: recheck these defaults (auto-filled by IDE Copilot) later and see what I can find about the vehicles in the original paper
+
+
 @dataclass(frozen=True, slots=True)
 class VehicleParams:
-    """ vehicle physical parameters and kinematic limits """
-    wheelbase: float = 2.7
+    """ vehicle physical parameters and kinematic limits - reference: https://volkswagen-specs.com/passat/2006-2010/specs/ """
+    wheelbase: float = 2.7  # right around the target for the 2006 Passat from their paper (106.7 m)
     max_steer: float = math.radians(35.0)
     # Geometry (for rectangle footprint collision)
-    width: float = 1.9
+    width: float = 1.8
     front_overhang: float = 0.9
     rear_overhang: float = 1.0
 
@@ -71,15 +84,32 @@ class GridSpec:
     theta_bins: int            # number of discretized headings
     origin_xy: Tuple[float, float] = (0.0, 0.0)  # world origin of grid [m]
     #& update: adding curvature parameters for the grid spec
-    kappa_bins: int = 21       # number of discretized curvature bins
+    kappa_bins: int = 11       # (grid curvature resolution) number of discrete curvature values
     kappa_max: float = 0.2     # max curvature (1/meters)
 
+    def __post_init__(self) -> None:
+        if float(self.resolution) <= 0.0:
+            raise ValueError("GridSpec.resolution must be > 0")
+        if int(self.theta_bins) <= 0:
+            raise ValueError("GridSpec.theta_bins must be an integer > 0")
+        if int(self.kappa_bins) <= 0:
+            raise ValueError("GridSpec.kappa_bins must be an integer > 0")
+        if float(self.kappa_max) < 0.0:
+            raise ValueError("GridSpec.kappa_max must be >= 0")
+        object.__setattr__(self, "resolution", float(self.resolution))
+        object.__setattr__(self, "theta_bins", int(self.theta_bins))
+        object.__setattr__(self, "kappa_bins", int(self.kappa_bins))
+        object.__setattr__(self, "kappa_max", float(self.kappa_max))
 
-#! CURRENTLY UNUSED
+    def to_dict(self):
+        return asdict(self)
+
+
+
 @dataclass(frozen=True, slots=True)
 class PlannerWeights:
-    reverse_penalty: float = 2.0
-    switch_dir_penalty: float = 20.0
+    reverse_penalty: float = 0.1
+    switch_dir_penalty: float = 10.0
     # integrating Voronoi $\rho \in \[0,1\]$ along path edges to prefer paths away from obstacles
     voronoi_weight: float = 0.5  # placeholder weights for later extension
     # steer_change_weight: float = 0.0
@@ -88,51 +118,50 @@ class PlannerWeights:
     kappa_rate_weight: float = 0.05              # weight on $\int u^2 ds$ (for curvature change in the cost function)
     kappa_rate_change_weight: float = 0.5        # weight on $|u - u_prev|$ (optional extra smoothing)
 
-@dataclass(frozen=True, slots=True)
-class VoronoiParams:
-    alpha: float = 1.0
-    dO_max: float = 5.0
+# @dataclass(frozen=True, slots=True)
+# class VoronoiParams:
+#     alpha: float = 1.0
+#     dO_max: float = 5.0
 
 
 @dataclass(frozen=True, slots=True)
 class PlannerConfig:
     grid: GridSpec
     vehicle: VehicleParams
-    weights: PlannerWeights = PlannerWeights()
-    voronoi: VoronoiParams = VoronoiParams()
-    step_size: float = 0.5                 # propagation distance per expansion [m]
+    weights: PlannerWeights = field(default_factory=PlannerWeights)
+    # voronoi: VoronoiParams = field(default_factory=VoronoiParams)
+    voronoi_alpha: float = 1.0
+    voronoi_dO_max: float = 5.0
+    #! FIXME: should probably be the same as (or a multiple of) the resolution:
+    step_size: float = 1.0                 # propagation distance per expansion [m]
     n_substeps: int = 5                    # collision sampling along edge
     # steering_samples: int = 9              # number of discrete steering controls
-    # TODO: need to go back and track down instantiations of PlannerConfig to update steering_samples to curvature change samples
-    #& UPDATE: replace steering samples with curvature change samples
-    # Curvature-rate control samples $u = d\kappa/ds$. Typically 3: [-u_max, 0, +u_max]
-    kappa_rate_samples: int = 3
+    kappa_rate_samples: int = 3 # curvature-rate control samples $u = d\kappa/ds$. Typically 3: [-u_max, 0, +u_max]
     allow_reverse: bool = True
-    # [PLACEHOLDER] analytic expansion hook: try every N expansions; larger N => less frequent
     analytic_every_n: int = 20
     analytic_max_distance: float = 15.0    # only attempt analytic connection if within this (Euclidean)
     # table radius for non-holonomic heuristic (goal-local frame)
-    nonholonomic_table_xy_radius: float = 20.0
-    nonholonomic_table_xy_res: float = 1.0
-    nonholonomic_table_theta_res: float = math.radians(5.0)
+    nh_table_xy_radius: float = 20.0
+    nh_table_xy_res: float = 1.0
+    nh_table_theta_res: float = math.radians(5.0)
     # rectangle collision sampling in vehicle frame; if None, planners choose a default based on grid resolution
     footprint_sample_step: Optional[float] = None
     #& UPDATE: adding curvature parameters that may change in the immediate future
     kappa_max: float = 0.2                  # max curvature $|\kappa|$ (1/meters)
-    kappa_bins: int = 21                    # (grid curvature resolution) number of discrete curvature values
     kappa_rate_max: float = 0.1            # max curvature change per step - $|u| = |\frac{d\kappa}{ds}|$ (1/m^2)
     # Variable-resolution step (2010 paper: longer arcs in wider Voronoi regions)
-    use_variable_step: bool = True
+    use_variable_step: bool = False # Set False for tighter, highly discretized mazes; Set true for large open spaces + sparse obstacles
     step_size_max: float = 3.0
     variable_step_beta: float = 0.5         # ds ≈ beta*(dO + dV); if dV unavailable we approximate with dO
     # Large-grid support: avoid dense best_g if the full 4D lattice is too large
-    dense_best_g_max_states: int = 50_000_000
+    dense_best_g_max_states: int = 5_000_000
 
 
 
-#! MIGHT DELETE
-#!!!! FIXME: remove direction from the discretization key/function and replace with curvature (kappa)
-    #!! will likely involve redesigning models.Indexer
+# TODO: might also want to do away with this one and keep it all in `HybridNode.key` as is currently used
+    # alternativately, I can move more methods from the Indexer class to this struct and make it a bit more of a "DiscreteState" class that encapsulates the discrete key and any relevant methods for hashing, neighbor generation, etc
+    # NOTE: right now, `Indexer.pose_to_key` instantiates DiscreteKey objects, but the Indexer class is still responsible for all the hashing and neighbor generation logic; could move some of that here
+        # also, `Indexer.key_to_flat` accepts a `DiscreteKey` and produces the singleton key - overall there seems to be plenty of opportunity to combine the two classes
 @dataclass(frozen=True, slots=True)
 class DiscreteKey:
     ix: int
@@ -142,7 +171,7 @@ class DiscreteKey:
         # now we keep direction as an edge/node attribute (not part of the key)
     # direction: int  # +1 forward, -1 reverse
     ikappa: int  # curvature bin index
-    
+
 
 
 @dataclass(slots=True)
@@ -169,6 +198,9 @@ class HybridNode:
     - Honestly may just want to go rogue and keep it in the state, regardless of what the instructions say, since it makes sense for switch penalties
     """
 
+
+
+# TODO: work on the MCAP visualization code to utilize the stats classes
 
 
 @dataclass(slots=True)

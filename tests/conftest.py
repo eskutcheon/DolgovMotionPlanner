@@ -1,5 +1,6 @@
 
 import sys
+from typing import Tuple, List, Optional, Any
 from pathlib import Path
 import numpy as np
 import pytest
@@ -14,7 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 @pytest.fixture
 def grid_spec():
     from structs import GridSpec
-    return GridSpec(resolution=1.0, theta_bins=72, origin_xy=(0.0, 0.0), kappa_bins=36)
+    return GridSpec(resolution=1.0, theta_bins=36, origin_xy=(0.0, 0.0), kappa_bins=11)
 
 
 @pytest.fixture
@@ -33,12 +34,12 @@ def planner_config(grid_spec, vehicle_params):
         step_size=1.0,
         n_substeps=5,
         # steering_samples=7,
-        kappa_rate_samples=10,
+        kappa_rate_samples=3,
         allow_reverse=True,
         # keep the nonholonomic table smaller for tests
-        nonholonomic_table_xy_radius=8.0,
-        nonholonomic_table_xy_res=1.0,
-        nonholonomic_table_theta_res=np.deg2rad(10.0),
+        nh_table_xy_radius=8.0,
+        nh_table_xy_res=1.0,
+        nh_table_theta_res=np.deg2rad(10.0),
         footprint_sample_step=None,
     )
 
@@ -69,23 +70,26 @@ def grid_with_wall(grid_spec):
 #     occ = generate_random_maze_grid(80, 80, obstacle_prob=0.1, seed=42)
 #     return OccupancyGrid(occ, grid_spec)
 
-@pytest.fixture
-def maze_grid_file():
+
+def get_random_maze_file():
     return np.random.choice(list((Path(__file__).parent / "grids").glob("*.npz")))
 
+@pytest.fixture
+def easy_maze_file():
+    """ A fixture that provides a path to a random maze file from the grids directory. """
+    return r"tests/grids/5x5_square_res100.npz"
+    # return Path(r"tests/grids/5x5_slanted2_res100.npz")
+
+
 
 @pytest.fixture
-def states_from_maze(grid_spec, maze_grid_file):
+def maze_grid_and_poses(grid_spec, easy_maze_file) -> Tuple[Any, List[float], List[float]]:
     """ A grid with predefined obstacles for deterministic tests. """
     from models import OccupancyGrid
-    # occ = np.zeros((60, 60), dtype=bool)
-    # # Add some obstacles
-    # occ[10:15, 10:15] = True
-    # occ[20:25, 40:45] = True
-    # occ[35:40, 20:25] = True
-    # occ[45:50, 50:55] = True
-    # return OccupancyGrid(occ, grid_spec)
-    occ_grid, start, goal = OccupancyGrid.grid_from_file(maze_grid_file, grid_spec)
+    maze_file = get_random_maze_file()
+    # maze_file = easy_maze_file
+    print("Loading maze grid from file:", maze_file)
+    occ_grid, start, goal = OccupancyGrid.grid_from_file(maze_file, grid_spec) #, pad_cells=2)
     return occ_grid, start, goal
 
 

@@ -26,8 +26,8 @@ def test_out_of_bounds_is_occupied():
 
 
 def test_make_rectangle_footprint_offsets_shape_and_deterministic():
-    veh = VehicleParams()
-    pts = make_rectangle_footprint_offsets(veh, sample_step=1.0)
+    V = VehicleParams()
+    pts = make_rectangle_footprint_offsets(V.wheelbase, V.width, V.front_overhang, V.rear_overhang, sample_step=1.0)
     assert pts.ndim == 2
     assert pts.shape[1] == 2
     # deterministic order / contiguous
@@ -46,8 +46,8 @@ def test_pose_is_free_reference_point_only():
 
 
 def test_pose_is_free_with_rectangle_sampling_hits_obstacle():
-    veh = VehicleParams(width=2.0, front_overhang=1.0, rear_overhang=1.0, wheelbase=2.0)
-    offsets = make_rectangle_footprint_offsets(veh, sample_step=0.5)
+    V = VehicleParams(width=2.0, front_overhang=1.0, rear_overhang=1.0, wheelbase=2.0)
+    offsets = make_rectangle_footprint_offsets(V.wheelbase, V.width, V.front_overhang, V.rear_overhang, sample_step=0.5)
     grid = GridSpec(resolution=1.0, theta_bins=72)
     occ = np.zeros((20, 20), dtype=bool)
     og = OccupancyGrid(occ, grid)

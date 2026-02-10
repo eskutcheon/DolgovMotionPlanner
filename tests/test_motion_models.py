@@ -36,7 +36,6 @@ def test_bicycle_propagate_arc_has_expected_heading_change():
     #!!! FIXME: this will probably always fail since kappa below is derived from steer and L rather than the new approach
     # kappa = math.tan(steer) / L # NOTE: this kappa definition gives a final theta error around 0.028945
     k1 = k0 + u * ds  # new curvature (without clamping) after applying curvature rate u over distance ds
-    print("found kappa:", k1)
     # yaw update now uses midpoint curvature for better accuracy
     expected_dtheta = 0.5 * (k0 + k1) * ds
     assert abs(p1.theta - expected_dtheta) < 1e-6, f"Expected dtheta near {expected_dtheta}, got {p1.theta}"

@@ -5,7 +5,6 @@ import math
 import numpy as np
 
 if TYPE_CHECKING:
-    from structs import VehicleParams
     from models import OccupancyGrid, Pose
 
 
@@ -34,34 +33,9 @@ def clamp(x: float, lo: float, hi: float) -> float:
     return lo if x < lo else hi if x > hi else x
 
 
-def adjust_start_pose_for_clearance(
-    start: 'Pose',
-    grid: 'OccupancyGrid',
-) -> 'Pose':
-    """ if starting point is in obstacle, jitter to nearest neighbors until free """
-    x, y = start.x, start.y
-    ix, iy = grid.world_to_grid(x, y)
-    tried = set()
-    while grid.is_occupied(ix, iy):
-        # if starting point is in obstacle, try nearest neighbors until free
-        directions = [(0,1), (1,0), (0,-1), (-1,0)]
-        dir_indices = np.random.permutation(len(directions))
-        for idx in dir_indices:
-            dx, dy = directions[idx]
-            if (ix + dx, iy + dy) in tried:
-                continue
-            ix += dx
-            iy += dy
-            tried.add((ix, iy))
-            break
-    new_x, new_y = grid.grid_to_world(ix, iy)
-    return 'Pose'(new_x, new_y, start.theta, start.kappa)
 
-
-
-def generate_random_maze_grid(width: int, height: int, obstacle_prob: float, seed: Optional[int] = None) -> np.ndarray:
+def generate_random_maze_grid(width: int, height: int, obstacle_prob: float = 0.1, seed: Optional[int] = None) -> np.ndarray:
     """ Generate a random occupancy grid where chosen cells and a few neighbors are marked as obstacles """
-
     rng = np.random.default_rng(seed)
     occ = np.zeros((height, width), dtype=bool)
     obstacle_prob /= int(math.sqrt(width * height)) # adjust prob to avoid overfilling
@@ -125,8 +99,7 @@ def compute_distance_to_obstacles_m(occ: np.ndarray, resolution: float) -> np.nd
                     dist[y, x] = best
 
         # two-pass 8-neighbor chamfer with costs (1, sqrt(2))
-        c1 = resolution
-        c2 = resolution * math.sqrt(2.0)
+        c1, c2 = resolution, resolution * SQRT2
         # forward then backward passes
         fwd_neighbors = ((-1, 0, c1), (0, -1, c1), (-1, -1, c2), (1, -1, c2))
         min_pass(range(w), range(h), fwd_neighbors)
@@ -140,7 +113,7 @@ def compute_distance_to_obstacles_m(occ: np.ndarray, resolution: float) -> np.nd
 # Collision: rectangle footprint sampled in vehicle frame
 # ----------------------------
 
-def make_rectangle_footprint_offsets(vehicle: 'VehicleParams', sample_step: float) -> np.ndarray:
+def make_rectangle_footprint_offsets(wheelbase: float, width: float, front_overhang: float, rear_overhang: float, sample_step: float) -> np.ndarray:
     """ Return an (N,2) array of (dx,dy) offsets in the vehicle frame.
         Frame convention:
             - origin at rear axle center
@@ -155,10 +128,10 @@ def make_rectangle_footprint_offsets(vehicle: 'VehicleParams', sample_step: floa
     if step <= 0.0:
         raise ValueError("sample_step must be > 0")
     # rectangle bounds
-    x0 = -float(vehicle.rear_overhang)
-    x1 = float(vehicle.wheelbase + vehicle.front_overhang)
-    y0 = -0.5 * float(vehicle.width)
-    y1 = +0.5 * float(vehicle.width)
+    x0 = -float(rear_overhang)              # start of the rectangle footprint behind the rear axle
+    x1 = float(wheelbase + front_overhang)  # end of the rectangle footprint in front of the rear axle
+    y0 = -0.5 * float(width)
+    y1 = +0.5 * float(width)
     # generate grid of points to sample
     xs = np.arange(x0, x1 + 1e-9, step, dtype=np.float64)
     ys = np.arange(y0, y1 + 1e-9, step, dtype=np.float64)
@@ -166,12 +139,15 @@ def make_rectangle_footprint_offsets(vehicle: 'VehicleParams', sample_step: floa
     pts = np.stack([X.ravel(), Y.ravel()], axis=1)
     return np.ascontiguousarray(pts, dtype=np.float64)
 
-#& NEW
-def rectangle_circumscribed_radius(vehicle: 'VehicleParams') -> float:
+
+def rectangle_circumscribed_radius(wheelbase, width, front_overhang, rear_overhang) -> float:
     """ Conservative radius (meters) of the rectangular footprint around the rear-axle origin """
-    x_front = float(vehicle.wheelbase + vehicle.front_overhang)
-    x_rear = float(vehicle.rear_overhang)
-    y = 0.5 * float(vehicle.width)
+    # TODO: probably need to reformulate this whole function to give a more conservative radius
+    x_front = float(wheelbase + front_overhang)
+    x_rear = float(rear_overhang)
+    y = 0.5 * float(width)
+    # return math.hypot(rear_overhang + wheelbase, y)
+    #! pretty sure the hypotenuse of x_front and y will always be largest
     return max(math.hypot(x_front, y), math.hypot(x_rear, y))
 
 
@@ -180,6 +156,13 @@ def pose_is_free(p: 'Pose', grid: 'OccupancyGrid', footprint_offsets: Optional[n
         If `footprint_offsets` is None, checks only the reference point.
         Otherwise, checks all transformed offsets.
     """
+    #! FIXME: doesn't currently include the goal tolerance as a free region around the goal pose
+        # need to consider that primarily for _validate_exact_path in the planners (which checks whether the path is collision-free all the way to the goal pose)
+        #!!! PROBLEM TO INVESTIGATE: I think we're getting that the goal pose is in collision more often because the theta and kappa tolerances may prevent us from small,
+        # last minute adjustments to the final pose that would otherwise allow it to be collision-free. This is especially true for the nonholonomic table test cases where the
+        # goal pose is often right up against a wall, and the planner needs to make a final small adjustment to the final pose to meet the tolerances. If that final small adjustment
+        # is prevented by the theta and kappa tolerances, then we may end up with a final pose that is in collision more often than if we had no tolerances and could make that final
+        # small adjustment to get out of collision.
     ox, oy = grid.grid.origin_xy
     res = float(grid.grid.resolution)
     # fast path: reference point only
@@ -205,7 +188,6 @@ def pose_is_free(p: 'Pose', grid: 'OccupancyGrid', footprint_offsets: Optional[n
 
 
 
-#& NEW
 def build_orientation_binned_footprint_cache(
     footprint_offsets_m: np.ndarray,
     resolution_m: float,

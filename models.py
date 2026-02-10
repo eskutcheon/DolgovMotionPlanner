@@ -5,10 +5,8 @@ import math
 import numpy as np
 from pathlib import Path
 
-from structs import GridSpec, VehicleParams, Pose, VoronoiParams, DiscreteKey, PlannerConfig
+from structs import GridSpec, VehicleParams, Pose, DiscreteKey, PlannerConfig
 from utils import TAU, SQRT2, wrap_angle, wrap_angle_2pi, pose_is_free, pose_is_free_cached_cells
-
-
 
 
 
@@ -26,6 +24,11 @@ class OccupancyGrid:
 
     def in_bounds(self, ix: int, iy: int) -> bool:
         return 0 <= ix < self.width and 0 <= iy < self.height
+
+    def pose_from_cell(self, ix: int, iy: int, theta: float = 0.0, kappa: float = 0.0) -> Pose:
+        """ helper method to create a Pose at the cell center (ix,iy) """
+        x, y = self.grid_to_world(ix, iy)
+        return Pose(x=x, y=y, theta=float(theta), kappa=float(kappa))
 
     def world_to_grid(self, x: float, y: float) -> Tuple[int, int]:
         ox, oy = self.grid.origin_xy
@@ -45,25 +48,112 @@ class OccupancyGrid:
             return True  # treat out-of-bounds as obstacles
         return bool(self.occ[iy, ix])
 
+    def _sanity_check_poses(self, sx: int, sy: int, gx: int, gy: int, err_msg: str) -> None:
+        if not self.in_bounds(sx, sy) or self.is_occupied(sx, sy):
+            raise ValueError(f"Start cell {err_msg}")
+        if not self.in_bounds(gx, gy) or self.is_occupied(gx, gy):
+            raise ValueError(f"Goal cell {err_msg}")
+
     @staticmethod
-    def grid_from_file(path: str | Path, grid: GridSpec) -> Tuple['OccupancyGrid', List[float], List[float]]:
-        """ Load a binary occupancy grid from a .npz file """
-        print("maze source file: ", path.stem)
-        occ_dict: Dict[str, np.ndarray] = np.load(path)
-        occ = occ_dict['occupancy']
-        start, goal = occ_dict['poses'].tolist()
-        print("Loaded occupancy grid from", path, "with shape, dtype", occ.shape, occ.dtype)
-        if occ.ndim != 2 or occ.dtype not in (bool, np.bool_, np.uint8):
-            raise ValueError("Occupancy grid must be a 2D boolean array")
-        if int(start[0]) < 0 or int(start[0]) >= occ.shape[1] or int(start[1]) < 0 or int(start[1]) >= occ.shape[0]:
-            raise ValueError("Start pose out of bounds in occupancy grid")
-        if int(goal[0]) < 0 or int(goal[0]) >= occ.shape[1] or int(goal[1]) < 0 or int(goal[1]) >= occ.shape[0]:
-            raise ValueError("Goal pose out of bounds in occupancy grid")
-        # ngl, wish I hadn't written it this way
-        occ = np.pad(occ, pad_width=1, mode='constant', constant_values=1)
-        print("shape before and after: ", occ_dict['occupancy'].shape, "->", occ.shape)
-        occ_grid = OccupancyGrid(occ.astype(bool), grid)
-        return occ_grid, start, goal
+    def grid_from_file(
+        path: str | Path, grid: GridSpec, poses_kind: str = "auto", pad_cells: int = 0
+    ) -> Tuple['OccupancyGrid', List[float], List[float]]:
+        """ Load a binary occupancy grid and start/goal indices/coordinates in the grid from a .npz file
+            Expected keys:
+            - occupancy: HxW bool array
+            - poses: shape (2,2), either [[ix,iy],[ix,iy]] or [[x,y],[x,y]]
+            - optional: poses_kind: "grid" or "world"
+        """
+        if not isinstance(path, Path):
+            path = Path(path)
+        grid_dict: Dict[str, np.ndarray] = np.load(path)
+        occ = grid_dict['occupancy'].astype(bool, copy=False)
+        assert occ.ndim == 2, "Occupancy grid must be 2D"
+        poses = grid_dict['poses']
+        assert poses.shape == (2, 2), "Poses array must have shape (2,2)"
+        print("Loaded occupancy grid from", path, f"with shape {occ.shape} and dtype {occ.dtype}")
+        # Resolve pose convention
+        assert poses_kind in ("auto", "grid", "world"), f"Invalid poses_kind={poses_kind!r}"
+        if poses_kind == "auto":
+            # if poses are integer-like and inside bounds, treat as grid indices (cell centers)
+            int_like = np.array_equal(poses, np.round(poses))
+            in_bounds = (
+                np.all(poses[:, 0] >= 0) and np.all(poses[:, 1] >= 0) and
+                np.all(poses[:, 0] < occ.shape[1]) and np.all(poses[:, 1] < occ.shape[0])
+            )
+            poses_kind = "grid" if (int_like and in_bounds) else "world"
+        # Optional padding: if we add padding, we MUST shift the origin accordingly
+        if pad_cells > 0:
+            # np.pad(occ, pad_width=pad_cells, mode='reflect')
+            occ = np.pad(occ, pad_width=int(pad_cells), mode='reflect') #mode="constant", constant_values=True)
+            ox, oy = grid.origin_xy
+            r = float(grid.resolution)
+            gridspec_kwargs = grid.to_dict()
+            gridspec_kwargs['origin_xy'] = (ox - pad_cells * r, oy - pad_cells * r)
+            grid = GridSpec(**gridspec_kwargs)
+            print("Applied padding of", pad_cells, "cells; new shape:", occ.shape)
+        # create OccupancyGrid and set start/goal accordingly
+        occ_grid = OccupancyGrid(occ, grid)
+        # occ_grid.view_grid()    #! DEBUGGING - remove later
+        start_xy: List[float]
+        goal_xy: List[float]
+        if poses_kind == "grid":
+            sx, sy, gx, gy = [int(round(float(poses[i, j]))) for i, j in ((0, 0), (0, 1), (1, 0), (1, 1))]
+            occ_grid._sanity_check_poses(sx, sy, gx, gy, "is out of bounds or occupied")
+            start_xy, goal_xy = occ_grid.grid_to_world(sx, sy), occ_grid.grid_to_world(gx, gy)
+        else:
+            sx, sy, gx, gy = [float(poses[i, j]) for i, j in ((0, 0), (0, 1), (1, 0), (1, 1))]
+            s_ix, s_iy = occ_grid.world_to_grid(sx, sy)
+            g_ix, g_iy = occ_grid.world_to_grid(gx, gy)
+            occ_grid._sanity_check_poses(s_ix, s_iy, g_ix, g_iy, "world coordinates map to out-of-bounds or occupied cell")
+            start_xy, goal_xy = [sx, sy], [gx, gy]
+        return occ_grid, start_xy, goal_xy
+
+
+    def view_grid(self, path: Optional[List[Pose]] = None):
+        """ print grid with two different markers for free space and obstacles; optionally overlay a path """
+        YELLOW = '\033[93m'
+        RESET = '\033[0m'
+        RED = '\033[91m'
+        grid_display = np.full(self.occ.shape, '.', dtype=str)
+        grid_display[self.occ] = '#'
+        grid_display = grid_display.tolist()
+        if path is not None:
+            for p in path:
+                ix, iy = self.world_to_grid(p.x, p.y)
+                if 0 <= ix < self.occ.shape[1] and 0 <= iy < self.occ.shape[0]:
+                    # mark collisions in red and other path poses in yellow
+                    marker = RED + 'X' + RESET if self.occ[iy, ix] else YELLOW + 'o' + RESET
+                    grid_display[iy][ix] = marker
+        # print(grid_display)
+        for row in grid_display:
+            print("".join(row))
+
+
+
+def adjust_start_pose_for_clearance(
+    start: Pose,
+    grid: OccupancyGrid,
+) -> Pose:
+    """ if starting point is in obstacle, jitter to nearest neighbors until free """
+    x, y = start.x, start.y
+    ix, iy = grid.world_to_grid(x, y)
+    tried = set()
+    while grid.is_occupied(ix, iy):
+        # if starting point is in obstacle, try nearest neighbors until free
+        directions = [(0,1), (1,0), (0,-1), (-1,0)]
+        dir_indices = np.random.permutation(len(directions))
+        for idx in dir_indices:
+            dx, dy = directions[idx]
+            if (ix + dx, iy + dy) in tried:
+                continue
+            ix += dx
+            iy += dy
+            tried.add((ix, iy))
+            break
+    new_x, new_y = grid.grid_to_world(ix, iy)
+    return Pose(new_x, new_y, start.theta, start.kappa)
+
 
 
 
@@ -76,18 +166,20 @@ class VoronoiField:
         If $dV$ is not available, we use the simple proxy $dV := dO$
     """
 
-    def __init__(self, dO_m: np.ndarray, params: VoronoiParams, dV_m: Optional[np.ndarray] = None):
+    def __init__(self, dO_m: np.ndarray, alpha: float, dO_max: float, dV_m: Optional[np.ndarray] = None):
         self.dO = dO_m.astype(np.float64, copy=False)
         self.dV = dV_m.astype(np.float64, copy=False) if dV_m is not None else None
-        self.params = params
+        # self.params = params
+        self.alpha = float(alpha)
+        self.dO_max = float(dO_max)
 
     # TODO: consider decorating this function with @property to cache the result
     def rho(self) -> np.ndarray:
         """ Vectorized potential in [0,1] on the grid.
             NOTE: If $dV$ is not available, proxy it with $dV := dO$ (keeps a weak "skeleton-ish" scaling effect)
         """
-        alpha = float(self.params.alpha)
-        dO_max = float(self.params.dO_max)
+        alpha = float(self.alpha)
+        dO_max = float(self.dO_max)
         dO = self.dO
         dV = self.dV if self.dV is not None else dO
         # Eq. (1)-style potential, clipped to [0,1]
@@ -134,8 +226,8 @@ class Indexer:
     #& UPDATE: modifying functions below to use curvature, not direction
     #&#############################################################################################
 
-    # TODO: should remove the direction argument but for now I'm just giving it a default to put off more changes
-    def pose_to_key(self, pose: Pose, direction: int = None) -> DiscreteKey:
+    #? NOTE: DiscreteKey could be removed in favor of explicit tuples
+    def pose_to_key(self, pose: Pose) -> DiscreteKey:
         ix, iy = self.grid.world_to_grid(pose.x, pose.y)
         itheta = self._theta_to_bin(pose.theta)
         ikappa = kappa_to_bin(pose.kappa, self.kappa_min, self.kappa_max, self.dkappa, self.kappa_bins)
@@ -158,7 +250,7 @@ class BicycleModel:
 
     #& UPDATE: modified propagation approach to use curvature instead of steering angle
     def propagate(self, pose: Pose, u: float, direction: int, ds: float, *, kappa_max: float) -> Pose:
-        """ Propagate the bicycle model for distance $ds$ with curvature-rate $u$ and direction (+1 forward, -1 reverse)
+        r""" Propagate the bicycle model for distance $ds$ with curvature-rate $u$ and direction (+1 forward, -1 reverse)
             new system parameters:
                 $u  =  d\kappa / ds$
                 $d\theta / ds  =  \sigma \kappa$
@@ -199,7 +291,7 @@ class BicycleModel:
         theta_bins: int = 0,
         rho: Optional[np.ndarray] = None,
     ) -> Optional[Tuple[Pose, float]]: # ) -> Optional[Pose]:
-        """ Propagate + collision-check along the edge; returns (endpoint, $\int \rho ds$) if collision-free else None. """
+        r""" Propagate + collision-check along the edge; returns (endpoint, $\int \rho ds$) if collision-free else None. """
         #& UPDATE: added curvature parameters to the function signature above, which now returns a tuple of (Pose, float) or None
         step = float(ds) / float(n_substeps)
         cur = pose
@@ -331,23 +423,21 @@ class NonHolonomicWithoutObstaclesTable:
     """
     def __init__(self, config: PlannerConfig):
         self.cfg = config
-        #& UPDATE: modified table and meta to include curvature dimension
         self._table: Optional[np.ndarray] = None  # [iy, ix, itheta, ikappa]
-        # self._meta: Optional[Tuple[float, float, int, float, int]] = None  # (R, res, theta_bins, dth, nxy)
-        #& UPDATE: self._meta now holds (R, res, theta_bins, dth, nxy, kappa_bins, kappa_max, dkappa)
+        # (R, res, theta_bins, dth, nxy, kappa_bins, kappa_max, dkappa)
         self._meta: Optional[Tuple[float, float, int, float, int, int, float, float]] = None
 
     def build_offline(self) -> None:
-        R = float(self.cfg.nonholonomic_table_xy_radius)
-        res = float(self.cfg.nonholonomic_table_xy_res)
-        dth = float(self.cfg.nonholonomic_table_theta_res)
+        R = float(self.cfg.nh_table_xy_radius)
+        res = float(self.cfg.nh_table_xy_res)
+        dth = float(self.cfg.nh_table_theta_res)
         # local table dims
         nxy = int(math.ceil((2.0 * R) / res))
         if nxy % 2 == 0:
             nxy += 1
         theta_bins = int(round(TAU / dth))
         dth = TAU / float(theta_bins)
-        kappa_bins = int(self.cfg.kappa_bins)
+        kappa_bins = int(self.cfg.grid.kappa_bins)
         kappa_max = float(self.cfg.kappa_max)
         dkappa = (2.0 * kappa_max) / float(kappa_bins)
 
@@ -384,12 +474,9 @@ class NonHolonomicWithoutObstaclesTable:
             cur = Pose(x=x, y=y, theta=th, kappa=kappa)
             # expand neighbors and relax costs
             for direction in (+1, -1): # include reverse in heuristic table
-                # for steer in steer_set:
-                #     nxt = model.propagate(cur, steer, direction, res)
                 for u in u_set:
                     nxt = model.propagate(cur, u, direction, res, kappa_max = kappa_max)
                     # map nxt to table indices
-                    # TODO: rename to ix_next, etc. for better clarity
                     nix = int(round(nxt.x / res)) + nxy // 2
                     niy = int(round(nxt.y / res)) + nxy // 2
                     if not (0 <= nix < nxy and 0 <= niy < nxy):
