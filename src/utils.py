@@ -108,6 +108,32 @@ def compute_distance_to_obstacles_m(occ: np.ndarray, resolution: float) -> np.nd
         return dist
 
 
+def compute_gvd_distance_m(dO_m: np.ndarray, resolution: float) -> np.ndarray:
+    """ approximate distance-to-GVD by extracting a ridge mask from dO and running a distance transform to that ridge """
+    dO = dO_m.astype(np.float64, copy=False)
+    h, w = dO.shape
+    ridge = np.zeros((h, w), dtype=bool)
+    # skip map border for simplicity (I think borders are poor GVD indicators anyway)
+    for iy in range(1, h - 1):
+        for ix in range(1, w - 1):
+            c = float(dO[iy, ix])
+            if c <= 0.0:
+                continue
+            nbrs = dO[(iy - 1):(iy + 2), (ix - 1):(ix + 2)] #.ravel() # includes center cell, but that doesn't affect the max
+            # strict local maxima or broad plateau maxima (within tiny epsilon)
+            mx = float(np.max(nbrs))
+            if c >= mx - 1e-9:
+                # require at least two near-max neighbors to avoid isolated spikes
+                if int(np.sum(nbrs >= (mx - 1e-6))) >= 3:
+                    ridge[iy, ix] = True
+    # fallback for sparse/no-obstacle maps: avoid all-zero ridge by seeding the map centerline
+    if not np.any(ridge):
+        ridge[h // 2, :] = True
+        ridge[:, w // 2] = True
+    # distance transform to nearest ridge cell
+    return compute_distance_to_obstacles_m(ridge, float(resolution))
+
+
 
 # ----------------------------
 # Collision: rectangle footprint sampled in vehicle frame

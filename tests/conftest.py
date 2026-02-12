@@ -71,24 +71,29 @@ def grid_with_wall(grid_spec):
 #     return OccupancyGrid(occ, grid_spec)
 
 
-def get_random_maze_file():
-    return np.random.choice(list((Path(__file__).parent / "grids").glob("*.npz")))
+def get_random_maze_file() -> Path:
+    return Path(np.random.choice(list((Path(__file__).parent / "grids").glob("*.npz"))))
 
 @pytest.fixture
-def easy_maze_file():
-    """ A fixture that provides a path to a random maze file from the grids directory. """
-    return r"tests/grids/5x5_square_res100.npz"
+def easy_maze_file() -> Path:
+    """ fixture that provides a path to a random maze file from the grids directory """
+    return Path(r"tests/grids/5x5_square_res100.npz")
     # return Path(r"tests/grids/5x5_slanted2_res100.npz")
 
+@pytest.fixture
+def hard_maze_file() -> Path:
+    """ fixture that provides a path to a random maze file from the grids directory """
+    return Path(r"tests/grids/7x7_square_res100.npz")
 
 
 @pytest.fixture
-def maze_grid_and_poses(grid_spec, easy_maze_file) -> Tuple[Any, List[float], List[float]]:
-    """ A grid with predefined obstacles for deterministic tests. """
+def maze_grid_and_poses(grid_spec, hard_maze_file: Path) -> Tuple[Any, List[float], List[float]]:
+    """ A grid with predefined obstacles for deterministic tests """
     from src.models import OccupancyGrid
-    maze_file = get_random_maze_file()
+    # maze_file = get_random_maze_file()
     # maze_file = easy_maze_file
-    print("Loading maze grid from file:", maze_file)
+    maze_file = hard_maze_file
+    # print("Loading maze grid from file:", maze_file)
     occ_grid, start, goal = OccupancyGrid.grid_from_file(maze_file, grid_spec) #, pad_cells=2)
     return occ_grid, start, goal
 

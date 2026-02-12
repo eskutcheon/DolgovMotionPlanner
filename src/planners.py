@@ -1,14 +1,14 @@
 
 
 
-from typing import Dict, List, Optional, Tuple, Literal, Union
+from typing import Dict, List, Optional, Tuple, Literal, Union, TypeAlias, Callable
 import heapq
 import time
 import numpy as np
 # local module imports
 from src.structs import Pose, GoalSpec, PlannerStats, HybridNode, PlannerConfig, DiscreteKey #, PlannerTick, TickCallback
 from src.models import (
-    OccupancyGrid, Indexer, BicycleModel, VoronoiField, HolonomicWithObstacles2D, NonHolonomicWithoutObstaclesTable,
+    OccupancyGrid, Indexer, BicycleModel, VoronoiField, HolonomicWithObstacles2D, NonHolonomicWithoutObstaclesTable, compute_gvd_distance_m,
 )
 from src.utils import (
     SQRT2, wrap_angle, pose_is_free, compute_distance_to_obstacles_m, make_rectangle_footprint_offsets,
@@ -21,14 +21,17 @@ except Exception:  # pragma: no cover
     CPP_AVAILABLE = False
     run_search_cpp = None  # type: ignore
 
-# TODO: (IMPORTANT) separate manual timing and replace with decorators from `timeit`
 
+
+# type alias for the best-g structure, which can be either a dense numpy array or a sparse dict depending on the configuration
+BestGType: TypeAlias = Union[np.ndarray, Dict[Tuple[int, int], float]]
+# stores the current frontier of the analytic beam search, sorted by a terminal score that combines distance to goal with heuristic guidance
+SearchFrontierType: TypeAlias = List[Tuple[float, Pose, List[Pose], int, float, float]]
 
 
 
 class HybridAStarPlannerBase:
     """ Hybrid A* planner (Dolgov et al. style)
-        # TODO: EDIT LATER (legacy description)
         Reference Hybrid A*:
             - heap open-set
             - continuous pose stored in node (Hybrid A* "continuous state in discrete nodes")
@@ -49,7 +52,6 @@ class HybridAStarPlannerBase:
     ):
         self.map = occ_grid
         self.cfg = config
-        #& UPDATE: indexer now uses curvature parameters
         self.indexer = Indexer(occ_grid, kappa_bins=occ_grid.grid.kappa_bins, kappa_max=occ_grid.grid.kappa_max)
         self.model = BicycleModel(config.vehicle)
         Vehicle = config.vehicle
@@ -70,10 +72,11 @@ class HybridAStarPlannerBase:
             self.footprint_offsets = None
         # Map-dependent fields (goal-independent) can be cached safely.
         self._dO = compute_distance_to_obstacles_m(self.map.occ, float(self.map.grid.resolution))
+        self._dV: Optional[np.ndarray] = None
         self._rho: Optional[np.ndarray] = None
-        #& UPDATE: integrated the new curvature change penalty from PlannerWeights here
         if use_voronoi_edge_cost and float(config.weights.voronoi_weight) > 0.0:
-            self._rho = VoronoiField(self._dO, self.cfg.voronoi_alpha, self.cfg.voronoi_dO_max).rho()
+            self._dV = compute_gvd_distance_m(self._dO, float(self.map.grid.resolution))
+            self._rho = VoronoiField(self._dO, self.cfg.voronoi_alpha, self.cfg.voronoi_dO_max, dV_m=self._dV).rho
         # Conservative collision gate radius (distance-transform) + cached footprint per theta bin
         res = float(self.map.grid.resolution)
         # print("SANITY CHECK: map resolution: ", res)
@@ -112,7 +115,7 @@ class HybridAStarPlannerBase:
         if (dx * dx + dy * dy) > goal.pos_tol**2:
             return False
         dth = wrap_angle(pose.theta - goal.pose.theta)
-        #& UPDATE: early exit on theta tolerance, so final check is for kappa
+        # early exit on theta tolerance, so final check is for kappa
         if abs(dth) > goal.theta_tol:
             return False
         # return abs(dth) <= goal.theta_tol
@@ -147,7 +150,7 @@ class HybridAStarPlannerBase:
         """ exact pose-by-pose footprint validation - starting at the goal and working backwards to the start (for better debugging of failure cases) """
         if verbose:
             all_coll = [p for p in path if not pose_is_free(p, self.map, self.footprint_offsets)]
-            print(f"Validating path with {len(path)} poses, {len(all_coll)} in collision, starting from goal:")
+            # print(f"Validating path with {len(path)} poses, {len(all_coll)} in collision, starting from goal:")
             for coll in all_coll[::-1]:  # print in reverse order (from start to goal)
                 ix, iy = self.map.world_to_grid(coll.x, coll.y)
                 print("Collision at pose: ", coll, " - grid indices: ", (iy, ix), "dO at cell: ", self._dO[iy, ix])
@@ -157,14 +160,13 @@ class HybridAStarPlannerBase:
                 return False
         return True
 
-    # def _should_try_analytic(self, pose: Pose, goal: Pose, expanded: int) -> bool:
-    #     if self.cfg.analytic_every_n <= 0:
-    #         return False
-    #     if expanded % self.cfg.analytic_every_n != 0:
-    #         return False
-    #     dx = pose.x - goal.x
-    #     dy = pose.y - goal.y
-    #     return (dx * dx + dy * dy) <= (self.cfg.analytic_max_distance ** 2)
+    def _should_try_analytic(self, pose: Pose, goal: Pose, expanded: int) -> bool:
+        if self.cfg.analytic_every_n <= 0 or expanded % self.cfg.analytic_every_n != 0:
+            return False
+        dx = pose.x - goal.x
+        dy = pose.y - goal.y
+        # test if goal is within the Euclidean distance threshold for an analytic attempt to be worthwhile (e.g., Reeds-Shepp shot)
+        return (dx * dx + dy * dy) <= (self.cfg.analytic_max_distance ** 2)
 
 
     def _select_step(self, pose: Pose) -> float:
@@ -178,19 +180,16 @@ class HybridAStarPlannerBase:
         if not self.map.in_bounds(ix, iy):
             return ds_min
         dO = float(self._dO[iy, ix])
-        # Approximate dV with dO if GVD distance unavailable: ds ≈ beta*(dO + dV) ≈ 2*beta*dO
-        ds = 2.0 * beta * dO
-        if ds < ds_min:
-            return ds_min
-        if ds > ds_max:
-            return ds_max
+        # Approximate dV with dO if GVD distance unavailable: $ds \approx \beta * (d_O + d_V) \approx 2 * \beta * d_O$
+        dV = float(self._dV[iy, ix]) if self._dV is not None else dO
+        ds = beta * (dO + dV) # equal to $2 \beta * dO$ if dV unavailable
+        ds = min(max(ds, ds_min), ds_max) # clamp to [ds_min, ds_max]
         return ds
 
     def _pose_is_free_fast(self, pose: Pose) -> bool:
         """ Use gate + cached footprint when possible; fall back to exact footprint near obstacles """
         ix, iy = self.map.world_to_grid(pose.x, pose.y)
         if not self.map.in_bounds(ix, iy):
-            print("START POSE FAILING IN-BOUNDS CHECK: ", pose, "grid bounds: ", self.map.width, self.map.height)
             return False
         if float(self._dO[iy, ix]) >= float(self._gate_radius_m):
             return True
@@ -199,49 +198,99 @@ class HybridAStarPlannerBase:
             return True
         # tight / ambiguous: do exact footprint check
         is_free = pose_is_free(pose, self.map, self.footprint_offsets)
-        print("START POSE FAILING EXACT CHECK: ", pose, "WITH POSE_IS_FREE: ", is_free)
-        print("START POSE INDICES: ", (iy, ix), "dO: ", self._dO[iy, ix], "gate radius: ", self._gate_radius_m)
         return is_free
+
+
+    def _terminal_score(self, pose: Pose, goal: GoalSpec, h2d: HolonomicWithObstacles2D) -> float:
+        dp = float(np.hypot(pose.x - goal.pose.x, pose.y - goal.pose.y))
+        dth = abs(wrap_angle(pose.theta - goal.pose.theta))
+        dk = abs(float(pose.kappa - goal.pose.kappa))
+        score = sum(w * val for w, val in zip(self.cfg.connector.terminal_score_weights, (dp, dth, dk)))
+        return score + 0.1 * self._heuristic(pose, goal, h2d)
 
 
     def _try_goal_shot(self, start_pose: Pose, goal: GoalSpec, h2d: HolonomicWithObstacles2D) -> Optional[List[Pose]]:
         r""" Fast 'analytic-like' attempt: greedily roll out a short sequence of $(\sigma,u)$ to reach the goal tolerance """
-        dx = start_pose.x - goal.pose.x
-        dy = start_pose.y - goal.pose.y
-        if (dx * dx + dy * dy) > float(self.cfg.analytic_max_distance) ** 2:
-            return None
-        cur = start_pose
-        path: List[Pose] = []
-        # prev_dir, prev_u = (+1, 0.0)
-        # small, bounded horizon
-        for _ in range(30):
-            if self._goal_reached(cur, goal):
-                return path
-            best = None
-            best_h = float("inf")
-            ds = self._select_step(cur)
-            for direction in ((+1, -1) if self.cfg.allow_reverse else (+1,)):
-                for u in self.u_set:
-                    res = self.model.rollout(
-                        cur, float(u), int(direction), float(ds), int(self.cfg.n_substeps),
-                        float(self.cfg.kappa_max), self.map, self.footprint_offsets,
-                        dO_m=self._dO, gate_radius_m=self._gate_radius_m, exact_check_margin_m=self._exact_margin_m,
-                        footprint_cache=self._footprint_cache, theta_bins=int(self.cfg.grid.theta_bins),
-                        rho=None,
-                    )
-                    if res is None:
-                        continue
-                    nxt, _ = res
-                    hh = self._heuristic(nxt, goal, h2d)
-                    if hh < best_h:
-                        best_h = hh
-                        best = (nxt, int(direction), float(u))
-            if best is None:
-                return None
-            cur, prev_dir, prev_u = best
-            path.append(cur)
-        return path if self._goal_reached(cur, goal) else None
+        horizon = max(4, int(self.cfg.connector.connector_horizon))
+        beam_width = max(2, int(self.cfg.connector.connector_beam_width))
+        directions = (+1, -1) if self.cfg.allow_reverse else (+1,)
+        # keep track of the path taken to reach each node in the beam for easy reconstruction if we find a valid connection to the goal
+        # entries: (terminal_score, pose, path, prev_dir, prev_u, local_cost)
+        #? NOTE: can't make this a heap since the Pose class doesn't have the dunder methods for comparison - might keep a heap just for tscores and index them that way
+        beam: SearchFrontierType = [(self._terminal_score(start_pose, goal, h2d), start_pose, [], +1, 0.0, 0.0)]
+        best_path: Optional[List[Pose]] = None
+        best_score = float("inf")
+        # bounded horizon search with a simple cost that combines terminal distance to goal with integrated Voronoi cost & curvature regularization
+        for _ in range(horizon):
+            candidates: SearchFrontierType = []
+            seen_keys = set()
+            for _, cur, path, prev_dir, prev_u, local_cost in beam:
+                if self._goal_reached(cur, goal):
+                    return path
+                goal_dist = float(np.hypot(cur.x - goal.pose.x, cur.y - goal.pose.y))
+                ds = min(self._select_step(cur), max(float(self.cfg.step_size), goal_dist))
+                for direction in directions:
+                    for u in self.u_set:
+                        rollout_result = self.model.rollout(
+                            cur, float(u), int(direction), float(ds), int(self.cfg.n_substeps),
+                            float(self.cfg.kappa_max), self.map, self.footprint_offsets,
+                            dO_m=self._dO, gate_radius_m=self._gate_radius_m, exact_check_margin_m=self._exact_margin_m,
+                            footprint_cache=self._footprint_cache, theta_bins=int(self.cfg.grid.theta_bins),
+                            rho=None,
+                        )
+                        if rollout_result is None:
+                            continue
+                        nxt, rho_int = rollout_result
+                        key = self.indexer.pose_to_key(nxt)
+                        nxt_key = (*key.as_tuple(), direction)
+                        if nxt_key in seen_keys:
+                            continue
+                        seen_keys.add(nxt_key)
+                        cost = local_cost + self._edge_cost(ds, direction, prev_dir, u, prev_u, rho_int)
+                        tscore = cost + self._terminal_score(nxt, goal, h2d)
+                        nxt_path = path + [nxt]
+                        candidates.append((tscore, nxt, nxt_path, direction, u, cost))
+                        if tscore < best_score:
+                            best_score, best_path = tscore, nxt_path
+                if not candidates:
+                    break
+                beam = heapq.nsmallest(beam_width, candidates, key=lambda it: it[0])
+        if best_path and self._goal_reached(best_path[-1], goal):
+            return best_path
+        return None
 
+
+    def _smooth_path(self, path: List[Pose]) -> List[Pose]:
+        """ Lightweight post-search smoothing pass on (x,y,theta,kappa) with collision safeguards """
+        if not bool(self.cfg.use_path_smoothing) or len(path) < 5:
+            return path
+        out = list(path)
+        passes = max(1, int(self.cfg.smoothing_passes))
+        w = max(2, int(self.cfg.smoothing_window))
+        for _ in range(passes):
+            changed = False
+            for i in range(1, len(out) - 1):
+                lo = max(0, i - w)
+                hi = min(len(out) - 1, i + w)
+                p_prev = out[lo]
+                p_next = out[hi]
+                # line-search interpolation toward wider-neighborhood chord
+                alpha = 0.15
+                # rotational components are averaged on the unit circle to avoid discontinuities
+                cx = (1.0 - alpha) * out[i].x + alpha * 0.5 * (p_prev.x + p_next.x)
+                cy = (1.0 - alpha) * out[i].y + alpha * 0.5 * (p_prev.y + p_next.y)
+                sth = np.sin(out[i].theta) + alpha * (np.sin(p_prev.theta) + np.sin(p_next.theta))
+                cth = np.cos(out[i].theta) + alpha * (np.cos(p_prev.theta) + np.cos(p_next.theta))
+                th = float(np.arctan2(sth, cth))
+                kappa = float((1.0 - alpha) * out[i].kappa + alpha * 0.5 * (p_prev.kappa + p_next.kappa))
+                kappa = max(-float(self.cfg.kappa_max), min(float(self.cfg.kappa_max), kappa))
+                candidate = Pose(x=float(cx), y=float(cy), theta=th, kappa=kappa)
+                if pose_is_free(candidate, self.map, self.footprint_offsets):
+                    out[i] = candidate
+                    changed = True
+            if not changed:
+                break
+        return out
 
 
 
@@ -291,35 +340,62 @@ class HybridAStarPlannerPython(HybridAStarPlannerBase):
             use_voronoi_edge_cost=use_voronoi_edge_cost,
         )
         # sets self._use_dense_best_g and initialize best_g accordingly
-        self.best_g: Union[np.ndarray, Dict[int, float]] = self._init_best_g()
+        #& UPDATE: removed to keep planner object immutable and thread-safe across calls where possible
+        # self.best_g: Union[np.ndarray, Dict[int, float]] = self._init_best_g()
+
 
     # TODO: consider writing a wrapper class for best_g that abstracts away the dense vs sparse implementation details and provides get/set methods
         # would clean up the code a bit and encapsulate the logic better - could also potentially take over responsibilities of the `Indexer` class
 
-    def _init_best_g(self):
+    def _init_best_g(self) -> Tuple[bool, BestGType]:
         # determine whether to use dense best_g array or sparse dict based on grid size
         H, W = self.map.height, self.map.width
         theta_bins, kappa_bins = self.cfg.grid.theta_bins, self.cfg.grid.kappa_bins
         total_states = int(H) * int(W) * int(theta_bins) * int(kappa_bins)
-        self._use_dense_best_g = total_states <= int(self.cfg.dense_best_g_max_states)
-        if self._use_dense_best_g:
-            return np.full((H, W, theta_bins, kappa_bins), np.inf, dtype=np.float32)
-        else:
-            return {}
+        use_dense_best_g = total_states <= int(self.cfg.dense_best_g_max_states)
+        # optionally split by last direction (+1/-1) - tiny overhead and better consistency with switch penalties
+        direction_dim = 2 if bool(self.cfg.use_directional_dominance) else 1
+        if use_dense_best_g:
+            best_g = np.full((H, W, theta_bins, kappa_bins, direction_dim), np.inf, dtype=np.float32)
+            return use_dense_best_g, best_g
+        return use_dense_best_g, {}
+
+    @staticmethod
+    def _direction_bucket(direction: int) -> int:
+        return 0 if int(direction) >= 0 else 1
 
     #? NOTE: DiscreteKey could easily be written out of this in favor of passing indices directly
-    def _update_best_g(self, key: 'DiscreteKey', g: float):
-        if self._use_dense_best_g:
-            self.best_g[key.iy, key.ix, key.itheta, key.ikappa] = g
+    def _update_best_g(self, best_g: BestGType, use_dense_best_g: bool, key: 'DiscreteKey', g: float, direction: int):
+        dir_idx = self._direction_bucket(direction) if bool(self.cfg.use_directional_dominance) else 0
+        if use_dense_best_g:
+            best_g[key.iy, key.ix, key.itheta, key.ikappa, dir_idx] = g
         else:
-            self.best_g[self.indexer.key_to_flat(key)] = g
+            best_g[(self.indexer.key_to_flat(key), dir_idx)] = g
 
-    def _is_better_g(self, key: 'DiscreteKey', g: float) -> bool:
-        if self._use_dense_best_g:
-            return g <= float(self.best_g[key.iy, key.ix, key.itheta, key.ikappa]) + 1e-8
+    def _is_better_g(self, best_g: BestGType, use_dense_best_g: bool, key: 'DiscreteKey', g: float, direction: int) -> bool:
+        dir_idx = self._direction_bucket(direction) if bool(self.cfg.use_directional_dominance) else 0
+        if use_dense_best_g:
+            return g <= float(best_g[key.iy, key.ix, key.itheta, key.ikappa, dir_idx]) + 1e-8
         else:
             flat = self.indexer.key_to_flat(key)
-            return g <= float(self.best_g.get(flat, float("inf"))) + 1e-8
+            return g <= float(best_g.get((flat, dir_idx), float("inf"))) + 1e-8
+
+
+    def _attempt_analytic_connection(
+        self, cur: HybridNode, goal: GoalSpec, h2d: HolonomicWithObstacles2D, nodes: List[HybridNode], nid: int, *, verbose=False
+    ) -> Tuple[Optional[List[Pose]], bool]:
+        shot: Optional[List[Pose]] = self._try_goal_shot(cur.pose, goal, h2d)
+        if shot is None:
+            return None, False # return no path and success=False
+        # splice shot onto reconstructed prefix
+        prefix: List[Pose] = self._reconstruct(nodes, nid)
+        full_path = self._smooth_path(prefix + shot)
+        if full_path and not self._validate_path_exact(full_path, verbose=verbose):
+            # shot found but rejected by validation step
+            return full_path, False
+        if len(full_path) == 0:
+            print("[WARNING] Analytic shot succeeded but failed to reconstruct path; returning no path.")
+        return full_path, True
 
 
     """ Hybrid A* planner as Python implementation of the search loop """
@@ -335,58 +411,58 @@ class HybridAStarPlannerPython(HybridAStarPlannerBase):
         stats.start_time_s = time.perf_counter()
         # Goal-dependent holonomic-with-obstacles heuristic.
         h2d = self._build_goal_heuristics(goal)
+        use_dense_best_g, best_g = self._init_best_g()
         # total_states = int(h) * int(w) * int(tb) * int(kb)
         # formerly: open set like (f, tie, node_id)
-        open_heap: List[Tuple[float, int]] = []  # (f, node_id)
+        open_heap: List[Tuple[float, float, int]] = []  # (f, tie_key, node_id)
         nodes: List[HybridNode] = []
         start_key = self.indexer.pose_to_key(start) #, direction=+1)
         if not self.map.in_bounds(start_key.ix, start_key.iy) or not self._pose_is_free_fast(start): #, self.map, self.footprint_offsets):
             stats.end_time_s = time.perf_counter()
-            print("[WARNING] Start pose is in collision or out of bounds; returning no path.")
+            print("\n[WARNING] Start pose is in collision or out of bounds; returning no path.")
             return [], stats
         h0 = self._heuristic(start, goal, h2d)
         n0 = HybridNode(key=start_key, pose=start, g=0.0, h=h0, f=h0, parent_id=-1, parent_action=(+1, 0.0))
         nodes.append(n0)
-        #& UPDATE: best_g indexed by kappa bins in final dimension instead of direction
-        # best_g[start_key.iy, start_key.ix, start_key.itheta, int(start_key.ikappa)] = 0.0
-        self._update_best_g(start_key, 0.0)
-        heapq.heappush(open_heap, (n0.f, 0))
+        #& UPDATE: using new best_g update and check functions that handle both dense and sparse cases, as well as directional dominance if enabled
+        self._update_best_g(best_g, use_dense_best_g, start_key, 0.0, +1)
+        tie0 = -n0.g if bool(self.cfg.prefer_larger_g_tiebreak) else 0.0
+        heapq.heappush(open_heap, (n0.f, tie0, 0))
         stats.pushed += 1
+        best_h_nid = 0
+        best_h_val = n0.h
         while open_heap and stats.expanded < int(max_expansions):
-            _, nid = heapq.heappop(open_heap)
+            _, _, nid = heapq.heappop(open_heap)
             cur = nodes[nid]
             k = cur.key
             # dominance check: skip if no improvement
-            if not self.map.in_bounds(k.ix, k.iy) or not self._is_better_g(k, cur.g):
+            if not self.map.in_bounds(k.ix, k.iy) or not self._is_better_g(best_g, use_dense_best_g, k, cur.g, cur.parent_action[0]):
                 continue
             stats.expanded += 1
+            if cur.h < best_h_val:
+                best_h_val = float(cur.h)
+                best_h_nid = int(nid)
             # goal check for early exit
             if self._goal_reached(cur.pose, goal):
                 stats.end_time_s = time.perf_counter()
-                path: List[Pose] = self._reconstruct(nodes, nid)
+                # path: List[Pose] = self._reconstruct(nodes, nid)
+                path: List[Pose] = self._smooth_path(self._reconstruct(nodes, nid))
                 if path and not self._validate_path_exact(path, verbose=True):
-                    print("[WARNING] Goal reached but final path failed exact collision check; returning no path.")
+                    print("\n[WARNING] Goal reached but final path failed exact collision check; returning no path.")
                     return [], stats
                 if len(path) == 0:
-                    print("[WARNING] Goal reached but failed to reconstruct path; returning no path.")
+                    print("\n[WARNING] Goal reached but failed to reconstruct path; returning no path.")
                 return path, stats
-            # TODO: move to its own function later
-            # test analytic expansion every N expansions # TODO: (should probably put a minimum distance threshold here too)
-            if self.cfg.analytic_every_n > 0 and (stats.expanded % int(self.cfg.analytic_every_n) == 0):
+            if self._should_try_analytic(cur.pose, goal.pose, stats.expanded):
                 stats.analytic_attempts += 1
-                shot: Optional[List[Pose]] = self._try_goal_shot(cur.pose, goal, h2d)
-                if shot is not None:
+                shot_path, success = self._attempt_analytic_connection(cur, goal, h2d, nodes, nid)
+                # if a shot was found, either restart loop and skip this node (if validation failed) or return path
+                if shot_path is not None:
+                    if not success:
+                        continue
                     stats.analytic_successes += 1
-                    # splice shot onto reconstructed prefix
-                    prefix: List[Pose] = self._reconstruct(nodes, nid)
                     stats.end_time_s = time.perf_counter()
-                    full_path = prefix + shot
-                    if full_path and not self._validate_path_exact(full_path, verbose=True):
-                        print("[WARNING] Analytic shot path fails exact collision validation; returning no path.")
-                        return [], stats
-                    if len(full_path) == 0:
-                        print("[WARNING] Analytic shot succeeded but failed to reconstruct path; returning no path.")
-                    return full_path, stats
+                    return shot_path, stats
             prev_dir, prev_u = cur.parent_action
             # expand children via ~~discrete steering~~ curvature-rate controls and direction
             directions = (+1, -1) if self.cfg.allow_reverse else (+1,)
@@ -404,24 +480,31 @@ class HybridAStarPlannerPython(HybridAStarPlannerBase):
                     if res is None:
                         continue
                     nxt_pose, rho_int = res
-                    # TODO: needs updating on the backend logic (after inclusion of curvature)
                     nxt_key = self.indexer.pose_to_key(nxt_pose) #, direction)
                     if not self.map.in_bounds(nxt_key.ix, nxt_key.iy):
                         continue
-                    # cost: length + direction penalties + optional Voronoi integral # TODO: integrate rho back in
+                    # cost: length + direction penalties + optional Voronoi integral
                     g2 = cur.g + self._edge_cost(ds, direction, prev_dir, float(u), float(prev_u), float(rho_int))
                     # dominance check: only keep best g per discrete key
-                    if not self._is_better_g(nxt_key, g2):
+                    if not self._is_better_g(best_g, use_dense_best_g, nxt_key, g2, direction):
                         continue
                     h2 = self._heuristic(nxt_pose, goal, h2d)
                     n2 = HybridNode(key=nxt_key, pose=nxt_pose, parent_id=nid, g=g2, h=h2, f = g2 + h2, parent_action=(direction, u))
                     nodes.append(n2)
-                    nid2 = len(nodes) - 1
-                    self._update_best_g(nxt_key, g2)
-                    heapq.heappush(open_heap, (n2.f, nid2))
+                    # self._update_best_g(nxt_key, g2)
+                    # heapq.heappush(open_heap, (n2.f, len(nodes) - 1))
+                    self._update_best_g(best_g, use_dense_best_g, nxt_key, g2, direction)
+                    tie = -n2.g if bool(self.cfg.prefer_larger_g_tiebreak) else 0.0
+                    heapq.heappush(open_heap, (n2.f, tie, len(nodes) - 1))
                     stats.pushed += 1
+        # last-chance bounded connector from best frontier node (helps sparse/open maps)
+        if self.cfg.use_analytic_connector and 0 <= best_h_nid < len(nodes):
+            shot_path, success = self._attempt_analytic_connection(nodes[best_h_nid], goal, h2d, nodes, best_h_nid, verbose=True)
+            if shot_path and success:
+                stats.end_time_s = time.perf_counter()
+                return shot_path, stats
         stats.end_time_s = time.perf_counter()
-        print("[INFO] Planner failed to find a path within the expansion limit; returning no path.")
+        print("\n[INFO] Planner failed to find a path within the expansion limit; returning no path.")
         return [], stats
 
 

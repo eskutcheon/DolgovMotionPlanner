@@ -5,9 +5,6 @@ import math
 
 
 
-# TODO: add more accessor helper methods to be used throughout the rest of the pipeline (e.g. like `Pose.as_tuple` or `GridSpec.to_dict`)
-
-
 @dataclass(frozen=True, slots=True)
 class Pose:
     """ continuous pose in world frame - located at the rear axle center by convention """
@@ -15,7 +12,6 @@ class Pose:
     y: float
     theta: float  # yaw (radians)
     # $\kappa$ here is the signed curvature of the rear axle path: kappa = tan(steering_angle) / wheelbase width
-    #& UPDATE: include curvature in the state for non-holonomic heuristics and analytic expansions
     kappa: float = 0.0  # curvature (1/meters)
     # NOTE: keeping a direction bit in the state isn't a bad idea, but the take-home instructions explicitly define state as `state = (x, y, yaw, curvature`
         # $\sigma \in \{0,1\}$ can still indicate forward/reverse motion along an edge, but not as a hashed state component
@@ -28,24 +24,11 @@ class Pose:
         return f"Pose(x={self.x:.2f}, y={self.y:.2f}, theta={math.degrees(self.theta):.1f} deg, kappa={self.kappa:.3f} 1/m)"
 
 
-"""
-# TODO: I'm considering a major refactor that centralizes all the `Spec` and `Params` classes that are more like global experimental
-# configurations into a single object to access things like tolerances, vehicle params, grid specs, general Boolean-valued settings, etc
-    # I'd keep the separate lower-level structs for the most part but have a top-level `ExperimentConfig` or similar that holds instances of each
-# A ton of these values are basically global constants, e.g. `GoalSpec` variable tolerances, `VehicleParams` physical dimensions,
-    # `GridSpec` discretization settings, `PlannerWeights`
-    # This was essentially meant to be the functionality of `PlannerConfig`, but that class has become more of a grab-bag of settings
-        # rather than a clean config object, and the Planners and Heuristic classes don't properly reference that single object or
-        # even save copies of relevant variables in some cases
-"""
-
-
 @dataclass(frozen=True, slots=True)
 class GoalSpec:
     pose: Pose
     pos_tol: float = 0.5      # meters
     theta_tol: float = math.radians(10.0)
-    #& UPDATE: added kappa tolerance for goal specification
     kappa_tol: float = 0.1    # 1/meters
     # kappa_goal: Optional[float] = None  # desired goal curvature (if any)
 
@@ -123,6 +106,19 @@ class PlannerWeights:
 #     alpha: float = 1.0
 #     dO_max: float = 5.0
 
+@dataclass(frozen=True, slots=True)
+class ConnectorParams:
+    """ parameters for the bounded analytic connector (beam search over curvature rate actions) """
+    connector_horizon: int = 24
+    connector_beam_width: int = 8
+    terminal_pos_weight: float = 8.0
+    terminal_theta_weight: float = 3.0
+    terminal_kappa_weight: float = 2.0
+
+    @property
+    def terminal_score_weights(self) -> Tuple[float, float, float]:
+        return (self.terminal_pos_weight, self.terminal_theta_weight, self.terminal_kappa_weight)
+
 
 @dataclass(frozen=True, slots=True)
 class PlannerConfig:
@@ -132,30 +128,40 @@ class PlannerConfig:
     # voronoi: VoronoiParams = field(default_factory=VoronoiParams)
     voronoi_alpha: float = 1.0
     voronoi_dO_max: float = 5.0
-    #! FIXME: should probably be the same as (or a multiple of) the resolution:
-    step_size: float = 1.0                 # propagation distance per expansion [m]
-    n_substeps: int = 5                    # collision sampling along edge
-    # steering_samples: int = 9              # number of discrete steering controls
-    kappa_rate_samples: int = 3 # curvature-rate control samples $u = d\kappa/ds$. Typically 3: [-u_max, 0, +u_max]
+    # TODO: might want to rename this since it's now only used to set ds
+    step_size: float = 1.0          # propagation distance per expansion [m] - should be a multiple of the grid resolution
+    n_substeps: int = 5             # collision sampling along edge
+    kappa_rate_samples: int = 3     # curvature-rate control samples $u = d\kappa/ds$. Typically 3: [-u_max, 0, +u_max]
     allow_reverse: bool = True
-    analytic_every_n: int = 20
+    analytic_every_n: int = 100
     analytic_max_distance: float = 15.0    # only attempt analytic connection if within this (Euclidean)
     # table radius for non-holonomic heuristic (goal-local frame)
     nh_table_xy_radius: float = 20.0
     nh_table_xy_res: float = 1.0
     nh_table_theta_res: float = math.radians(5.0)
+    # non-holonomic table tightening - optional coarser/explicit curvature bins
+    nh_kappa_bins: Optional[int] = None
     # rectangle collision sampling in vehicle frame; if None, planners choose a default based on grid resolution
     footprint_sample_step: Optional[float] = None
-    #& UPDATE: adding curvature parameters that may change in the immediate future
     kappa_max: float = 0.2                  # max curvature $|\kappa|$ (1/meters)
     kappa_rate_max: float = 0.1            # max curvature change per step - $|u| = |\frac{d\kappa}{ds}|$ (1/m^2)
     # Variable-resolution step (2010 paper: longer arcs in wider Voronoi regions)
     use_variable_step: bool = False # Set False for tighter, highly discretized mazes; Set true for large open spaces + sparse obstacles
     step_size_max: float = 3.0
     variable_step_beta: float = 0.5         # ds ≈ beta*(dO + dV); if dV unavailable we approximate with dO
-    # Large-grid support: avoid dense best_g if the full 4D lattice is too large
+    # large-grid support - avoids dense best_g if the full 4D lattice is too large
     dense_best_g_max_states: int = 5_000_000
-
+    # keep separate best-g per last-motion direction (+1/-1) while preserving the same hashed state key (x, y, theta, kappa)
+    use_directional_dominance: bool = True
+    # open-list tie break - when f is equal, prefer deeper nodes (larger g)
+    prefer_larger_g_tiebreak: bool = True
+    # bounded analytic connector (beam search over curvature-rate actions)
+    use_analytic_connector: bool = True
+    connector: ConnectorParams = field(default_factory=ConnectorParams)
+    # Post-search path smoothing
+    use_path_smoothing: bool = True
+    smoothing_passes: int = 3
+    smoothing_window: int = 10
 
 
 # TODO: might also want to do away with this one and keep it all in `HybridNode.key` as is currently used
@@ -167,11 +173,11 @@ class DiscreteKey:
     ix: int
     iy: int
     itheta: int
-    #& UPDATE: remove direction from discrete key and replace with curvature bin index
-        # now we keep direction as an edge/node attribute (not part of the key)
     # direction: int  # +1 forward, -1 reverse
     ikappa: int  # curvature bin index
 
+    def as_tuple(self) -> Tuple[int, int, int, int]:
+        return (self.ix, self.iy, self.itheta, self.ikappa)
 
 
 @dataclass(slots=True)
@@ -184,8 +190,6 @@ class HybridNode:
     h: float    # heuristic cost-to-go
     f: float    # total estimated cost
     parent_id: int = -1
-    #& UPDATE: add parent action back into the node as (sigma, delta_kappa)
-    # parent_action: Tuple[int, float] = (1, 0.0)  # (direction, steer_angle)
     #& Parent action is kept as an edge attribute (NOT part of the hashed DiscreteKey):
         # direction $\sigma \in \{+1,-1\}$, curvature-rate $u = \frac{d\kappa}{ds}$
     parent_action: Tuple[int, float] = (1, 0.0)  # (direction bit, curvature delta)
@@ -193,7 +197,7 @@ class HybridNode:
     """
     Tradeoff (explicit): if we exclude direction from the dominance key, we may prune a state that is geometrically identical
         but reached with a different last-motion mode. If switch penalties are large, that can change optimality. If this becomes
-        an issue, the "escape hatch" is to store two best-g values per key internally (one for last sigma = +1 and for -1) without
+        an issue, one solution is to store two best-g values per key internally (one for last sigma = +1 and for -1) without
         it technically being part of the state key used for hashing/lookup.
     - Honestly may just want to go rogue and keep it in the state, regardless of what the instructions say, since it makes sense for switch penalties
     """

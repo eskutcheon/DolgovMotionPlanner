@@ -3,4 +3,5 @@ include setup.py
 include pytest.ini
 include README.md
 recursive-include cpp *.cpp *.h
+recursive-include src *.py
 recursive-include tests *.py

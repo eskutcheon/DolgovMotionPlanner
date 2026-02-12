@@ -6,7 +6,7 @@ import numpy as np
 from pathlib import Path
 
 from src.structs import GridSpec, VehicleParams, Pose, DiscreteKey, PlannerConfig
-from src.utils import TAU, SQRT2, wrap_angle, wrap_angle_2pi, pose_is_free, pose_is_free_cached_cells
+from src.utils import TAU, SQRT2, wrap_angle, wrap_angle_2pi, pose_is_free, pose_is_free_cached_cells #, compute_gvd_distance_m
 
 
 
@@ -71,7 +71,7 @@ class OccupancyGrid:
         assert occ.ndim == 2, "Occupancy grid must be 2D"
         poses = grid_dict['poses']
         assert poses.shape == (2, 2), "Poses array must have shape (2,2)"
-        print("Loaded occupancy grid from", path, f"with shape {occ.shape} and dtype {occ.dtype}")
+        print("\nLoaded occupancy grid from", path, f"with shape {occ.shape} and dtype {occ.dtype}")
         # Resolve pose convention
         assert poses_kind in ("auto", "grid", "world"), f"Invalid poses_kind={poses_kind!r}"
         if poses_kind == "auto":
@@ -84,7 +84,6 @@ class OccupancyGrid:
             poses_kind = "grid" if (int_like and in_bounds) else "world"
         # Optional padding: if we add padding, we MUST shift the origin accordingly
         if pad_cells > 0:
-            # np.pad(occ, pad_width=pad_cells, mode='reflect')
             occ = np.pad(occ, pad_width=int(pad_cells), mode='reflect') #mode="constant", constant_values=True)
             ox, oy = grid.origin_xy
             r = float(grid.resolution)
@@ -94,7 +93,6 @@ class OccupancyGrid:
             print("Applied padding of", pad_cells, "cells; new shape:", occ.shape)
         # create OccupancyGrid and set start/goal accordingly
         occ_grid = OccupancyGrid(occ, grid)
-        # occ_grid.view_grid()    #! DEBUGGING - remove later
         start_xy: List[float]
         goal_xy: List[float]
         if poses_kind == "grid":
@@ -173,7 +171,7 @@ class VoronoiField:
         self.alpha = float(alpha)
         self.dO_max = float(dO_max)
 
-    # TODO: consider decorating this function with @property to cache the result
+    @property
     def rho(self) -> np.ndarray:
         """ Vectorized potential in [0,1] on the grid.
             NOTE: If $dV$ is not available, proxy it with $dV := dO$ (keeps a weak "skeleton-ish" scaling effect)
@@ -212,7 +210,6 @@ class Indexer:
         self.H = int(grid.height)
         self.theta_bins = int(grid.grid.theta_bins)
         self.dtheta = TAU / float(self.theta_bins)
-        #& UPDATE: adding curvature parameters for the new discretization functions
         self.kappa_bins = int(kappa_bins or grid.grid.kappa_bins)
         self.kappa_max = float(kappa_max or grid.grid.kappa_max)
         self.kappa_min = -self.kappa_max        # placeholder; should be set from PlannerConfig
@@ -222,9 +219,6 @@ class Indexer:
         """ Map heading to bin index """
         t = wrap_angle_2pi(theta)
         return int(math.floor(t / self.dtheta)) % self.theta_bins
-
-    #& UPDATE: modifying functions below to use curvature, not direction
-    #&#############################################################################################
 
     #? NOTE: DiscreteKey could be removed in favor of explicit tuples
     def pose_to_key(self, pose: Pose) -> DiscreteKey:
@@ -237,7 +231,6 @@ class Indexer:
         """ return flat packed index for best-g arrays """
         return int((((key.iy * self.W + key.ix) * self.theta_bins + key.itheta) * self.kappa_bins + key.ikappa))
 
-    #&#############################################################################################
 
 
 # ----------------------------
@@ -248,7 +241,7 @@ class BicycleModel:
     def __init__(self, vehicle: VehicleParams):
         self.L = float(vehicle.wheelbase)
 
-    #& UPDATE: modified propagation approach to use curvature instead of steering angle
+    # propagation approach uses curvature instead of steering angle
     def propagate(self, pose: Pose, u: float, direction: int, ds: float, *, kappa_max: float) -> Pose:
         r""" Propagate the bicycle model for distance $ds$ with curvature-rate $u$ and direction (+1 forward, -1 reverse)
             new system parameters:
@@ -362,7 +355,6 @@ class HolonomicWithObstacles2D:
         pq: List[Tuple[float, int, int]] = []
         dist[gy, gx] = 0.0
         heapq.heappush(pq, (0.0, gx, gy))
-        #& UPDATE: `compute` now just initializes the model while `__call__` internally calls `_ensure_settled` to loop over pq and lazily settle nodes
         self._dist = dist
         self._done = done
         self._pq = pq
@@ -382,7 +374,6 @@ class HolonomicWithObstacles2D:
             self._done[y, x] = True
             for dx, dy, step in self._nbrs:
                 nx, ny = x + dx, y + dy
-                # TODO: create small helpers for this and other long conditional chains
                 if self.grid.is_occupied(nx, ny) or (self._dO is not None and self._min_clear > 0.0 and float(self._dO[ny, nx]) < self._min_clear):
                     continue
                 extra = float(self.cost_per_cell[ny, nx]) if self.cost_per_cell is not None else 0.0
@@ -416,7 +407,6 @@ class HolonomicWithObstacles2D:
 
 
 
-# TODO: replace bits and pieces of these classes with new Spec classes instead of passing so much
 class NonHolonomicWithoutObstaclesTable:
     """ Goal-local heuristic table over (x, y, theta), ignoring obstacles - implements Dijkstra over a small goal-centered grid in goal frame
         - paper computes shortest path to (0,0,0) in a neighborhood, offline
@@ -437,7 +427,7 @@ class NonHolonomicWithoutObstaclesTable:
             nxy += 1
         theta_bins = int(round(TAU / dth))
         dth = TAU / float(theta_bins)
-        kappa_bins = int(self.cfg.grid.kappa_bins)
+        kappa_bins = int(self.cfg.nh_kappa_bins or self.cfg.grid.kappa_bins)
         kappa_max = float(self.cfg.kappa_max)
         dkappa = (2.0 * kappa_max) / float(kappa_bins)
 
@@ -458,7 +448,8 @@ class NonHolonomicWithoutObstaclesTable:
         gx = nxy // 2
         gy = nxy // 2
         gt = 0
-        gk = int(round(kappa_max / dkappa))
+        # gk = int(round(kappa_max / dkappa))
+        gk = kappa_to_bin(0.0, -kappa_max, kappa_max, dkappa, kappa_bins)
         table[gy, gx, gt, gk] = 0.0
         pq: List[Tuple[float, int, int, int, int]] = [(0.0, gx, gy, gt, gk)]
         heapq.heapify(pq)
