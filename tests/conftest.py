@@ -87,12 +87,12 @@ def hard_maze_file() -> Path:
 
 
 @pytest.fixture
-def maze_grid_and_poses(grid_spec, hard_maze_file: Path) -> Tuple[Any, List[float], List[float]]:
+def maze_grid_and_poses(grid_spec, easy_maze_file: Path) -> Tuple[Any, List[float], List[float]]:
     """ A grid with predefined obstacles for deterministic tests """
     from src.models import OccupancyGrid
     # maze_file = get_random_maze_file()
-    # maze_file = easy_maze_file
-    maze_file = hard_maze_file
+    maze_file = easy_maze_file
+    # maze_file = hard_maze_file
     # print("Loading maze grid from file:", maze_file)
     occ_grid, start, goal = OccupancyGrid.grid_from_file(maze_file, grid_spec) #, pad_cells=2)
     return occ_grid, start, goal

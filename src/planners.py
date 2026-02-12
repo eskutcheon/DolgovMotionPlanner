@@ -8,11 +8,11 @@ import numpy as np
 # local module imports
 from src.structs import Pose, GoalSpec, PlannerStats, HybridNode, PlannerConfig, DiscreteKey #, PlannerTick, TickCallback
 from src.models import (
-    OccupancyGrid, Indexer, BicycleModel, VoronoiField, HolonomicWithObstacles2D, NonHolonomicWithoutObstaclesTable, compute_gvd_distance_m,
+    OccupancyGrid, Indexer, BicycleModel, VoronoiField, HolonomicWithObstacles2D, NonHolonomicWithoutObstaclesTable
 )
 from src.utils import (
     SQRT2, wrap_angle, pose_is_free, compute_distance_to_obstacles_m, make_rectangle_footprint_offsets,
-    rectangle_circumscribed_radius, build_orientation_binned_footprint_cache
+    rectangle_circumscribed_radius, build_orientation_binned_footprint_cache, compute_gvd_distance_m
 )
 
 try:
