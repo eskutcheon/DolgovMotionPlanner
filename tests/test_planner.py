@@ -2,8 +2,8 @@
 
 import math
 from typing import List, Tuple, Any
+from dataclasses import replace
 import numpy as np
-
 np.set_printoptions(precision=3, suppress=True, threshold=100000)
 import pytest
 # local module imports
@@ -34,7 +34,7 @@ def test_python_backend_finds_path_on_empty_map(empty_grid: OccupancyGrid, plann
 
 
 def test_python_backend_returns_empty_if_start_in_obstacle(grid_spec: GridSpec, planner_config: PlannerConfig, goal_spec: GoalSpec):
-    from src.models import OccupancyGrid
+    from src.models.models import OccupancyGrid
     occ = np.zeros((20, 20), dtype=bool)
     occ[5, 5] = True
     grid = OccupancyGrid(occ, grid_spec)
@@ -88,6 +88,7 @@ def test_python_backend_handles_mazes(maze_grid_and_poses: Tuple[Any, List[float
 #^ WARNING: this test may expose shared-state bugs in the planner implementation
     # BUT it's not a final implementation and is mainly meant for testing that there aren't barriers to future concurrent implementations
 @pytest.mark.slow
+# @pytest.mark.concurrency
 def test_planner_can_be_called_concurrently(empty_grid: OccupancyGrid, planner_config: PlannerConfig, start_pose: Pose, goal_spec: GoalSpec):
     # test for shared-state bugs (even though Python backend is mostly serialized by the GIL).
     from concurrent.futures import ThreadPoolExecutor
@@ -130,3 +131,72 @@ def test_path_smoothing_preserves_collision_free(empty_grid, planner_config):
     assert len(sm) == len(raw)
     for p in sm:
         assert pose_is_free(p, empty_grid, planner.footprint_offsets)
+
+
+
+def test_adaptive_analytic_schedule_attempts_more_often_near_goal(empty_grid, planner_config):
+    from src.structs import AnalyticScheduleParams
+    cfg = planner_config
+    cfg = replace(
+        cfg,
+        analytic=AnalyticScheduleParams(
+            every_n=50,
+            max_distance=20.0,
+            use_adaptive_schedule=True,
+            min_interval=5,
+            max_interval=100,
+            distance_power=1.5,
+        ),
+    )
+    planner = planner_factory(empty_grid, cfg, backend="python")
+    goal = Pose(20.0, 20.0, 0.0, 0.0)
+    far = Pose(5.0, 5.0, 0.0, 0.0)
+    near = Pose(19.5, 19.5, 0.0, 0.0)
+    far_hits = sum(1 for e in range(1, 200) if planner._should_try_analytic(far, goal, e))
+    near_hits = sum(1 for e in range(1, 200) if planner._should_try_analytic(near, goal, e))
+    assert near_hits > far_hits
+
+
+def test_objective_smoother_anchors_colliding_points(grid_with_wall, planner_config):
+    from src.structs import PathSmootherParams
+    cfg = replace(
+        planner_config,
+        smoother=PathSmootherParams(use_objective_smoother=True, smoothing_anchor_rounds=2, objective_smoothing_iters=6),
+    )
+    planner = planner_factory(grid_with_wall, cfg, backend="python")
+    # middle points intentionally pass through the wall; anchored retries should fall back safely
+    raw = [
+        Pose(8.0, 30.0, 0.0, 0.0),
+        Pose(12.0, 30.0, 0.0, 0.0),
+        Pose(20.0, 30.0, 0.0, 0.0),
+        Pose(28.0, 30.0, 0.0, 0.0),
+        Pose(32.0, 30.0, 0.0, 0.0),
+    ]
+    sm = planner._smooth_path(raw)
+    assert len(sm) == len(raw)
+    # if refinement cannot fix collisions, algorithm should return original path (safe fallback behavior)
+    if any(not pose_is_free(p, grid_with_wall, planner.footprint_offsets) for p in sm):
+        assert sm == raw
+
+
+def test_curvature_aware_step_policy_reduces_step_at_high_kappa(empty_grid, planner_config):
+    from src.structs import StepPolicyParams
+    cfg: PlannerConfig = replace(
+        planner_config,
+        step_policy=StepPolicyParams(use_variable_step=True, step_size_max=10.0, variable_step_beta=0.2, curvature_slowdown_gain=3.0)
+    )
+    planner = planner_factory(empty_grid, cfg, backend="python")
+    low_kappa = Pose(15.0, 15.0, 0.0, 0.0)
+    high_kappa = Pose(15.0, 15.0, 0.0, cfg.kappa_max)
+    ds_low = planner._select_step(low_kappa)
+    ds_high = planner._select_step(high_kappa)
+    assert ds_high < ds_low
+
+
+def test_refiner_objective_includes_voronoi_weight(empty_grid, planner_config):
+    from src.structs import PathSmootherParams
+    cfg = replace(planner_config, smoother=PathSmootherParams(use_objective_smoother=True, objective_w_voronoi=0.7, objective_smoothing_iters=1))
+    planner = planner_factory(empty_grid, cfg, backend="python")
+    xy = np.array([[5.0, 5.0], [6.0, 5.0], [7.0, 5.0], [8.0, 5.0], [9.0, 5.0]], dtype=np.float64)
+    v = planner.refiner._objective_value(xy)
+    assert np.isfinite(v)

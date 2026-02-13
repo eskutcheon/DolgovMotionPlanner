@@ -1,15 +1,13 @@
 
 
 
-from typing import Dict, List, Optional, Tuple, Literal, Union, TypeAlias, Callable
+from typing import Dict, List, Optional, Tuple, Literal, Union, TypeAlias
 import heapq
 import time
 import numpy as np
 # local module imports
 from src.structs import Pose, GoalSpec, PlannerStats, HybridNode, PlannerConfig, DiscreteKey #, PlannerTick, TickCallback
-from src.models import (
-    OccupancyGrid, Indexer, BicycleModel, VoronoiField, HolonomicWithObstacles2D, NonHolonomicWithoutObstaclesTable
-)
+from src.models import *
 from src.utils import (
     SQRT2, wrap_angle, pose_is_free, compute_distance_to_obstacles_m, make_rectangle_footprint_offsets,
     rectangle_circumscribed_radius, build_orientation_binned_footprint_cache, compute_gvd_distance_m
@@ -77,6 +75,8 @@ class HybridAStarPlannerBase:
         if use_voronoi_edge_cost and float(config.weights.voronoi_weight) > 0.0:
             self._dV = compute_gvd_distance_m(self._dO, float(self.map.grid.resolution))
             self._rho = VoronoiField(self._dO, self.cfg.voronoi_alpha, self.cfg.voronoi_dO_max, dV_m=self._dV).rho
+        #& UPDATE: new path smoothing object does actual nonlinear optimization for refinement
+        self.refiner = PathRefiner(self.map, self.cfg.smoother, self._dO, self.cfg.kappa_max, footprint_offsets=self.footprint_offsets, rho=self._rho)
         # Conservative collision gate radius (distance-transform) + cached footprint per theta bin
         res = float(self.map.grid.resolution)
         # print("SANITY CHECK: map resolution: ", res)
@@ -123,17 +123,18 @@ class HybridAStarPlannerBase:
         return abs(dkappa) <= goal.kappa_tol
 
     def _edge_cost(self, ds: float, direction: int, prev_direction: int, u: float, prev_u: float, rho_int: float) -> float:
-        c = ds #float(self.cfg.step_size)
+        W = self.cfg.weights
+        c = ds
         if direction < 0:
-            c *= float(self.cfg.weights.reverse_penalty)
+            c *= W.reverse_penalty
         if direction != prev_direction:
-            c += float(self.cfg.weights.switch_dir_penalty)
+            c += float(W.switch_dir_penalty)
         # curvature-rate regularization (smooth steering evolution)
-        c += float(self.cfg.weights.kappa_rate_weight) * float(u * u) * float(ds)
-        c += float(self.cfg.weights.kappa_rate_change_weight) * abs(float(u - prev_u))
+        c += float(W.kappa_rate_weight) * float(u * u) * float(ds)
+        c += float(W.kappa_rate_change_weight) * abs(float(u - prev_u))
         # integrated Voronoi cost along the edge ($ \rho \in \[0,1\] $) if enabled
-        if rho_int > 0.0 and float(self.cfg.weights.voronoi_weight) > 0.0:
-            c += float(self.cfg.weights.voronoi_weight) * float(rho_int)
+        if rho_int > 0.0 and float(W.voronoi_weight) > 0.0:
+            c += float(W.voronoi_weight) * float(rho_int)
         return c
 
     @staticmethod
@@ -161,21 +162,36 @@ class HybridAStarPlannerBase:
         return True
 
     def _should_try_analytic(self, pose: Pose, goal: Pose, expanded: int) -> bool:
-        if self.cfg.analytic_every_n <= 0 or expanded % self.cfg.analytic_every_n != 0:
+        # if self.cfg.analytic_every_n <= 0 or expanded % self.cfg.analytic_every_n != 0:
+        analytic = self.cfg.analytic
+        if analytic.every_n <= 0:
             return False
         dx = pose.x - goal.x
         dy = pose.y - goal.y
         # test if goal is within the Euclidean distance threshold for an analytic attempt to be worthwhile (e.g., Reeds-Shepp shot)
-        return (dx * dx + dy * dy) <= (self.cfg.analytic_max_distance ** 2)
+        if (dx * dx + dy * dy) > (analytic.max_distance ** 2):
+            return False
+        if analytic.use_adaptive_schedule:
+            # near goal -> tighter interval (more frequent attempts), far from goal -> looser interval
+            d_max = max(1e-6, float(analytic.max_distance))
+            d_goal = float(np.hypot(dx, dy))
+            ratio = min(max(d_goal / d_max, 0.0), 1.0)
+            power = max(0.5, float(analytic.distance_power))
+            min_i = max(1, int(analytic.min_interval))
+            max_i = max(min_i, int(analytic.max_interval))
+            interval = int(round(min_i + (max_i - min_i) * (ratio ** power)))
+            return (expanded % max(1, interval)) == 0
+        return (expanded % int(analytic.every_n)) == 0
 
 
     def _select_step(self, pose: Pose) -> float:
         """ Variable-resolution step (longer arcs in wide free space on Voronoi regions) """
-        ds_min = float(self.cfg.step_size)
-        if not bool(self.cfg.use_variable_step):
+        step_cfg = self.cfg.step_policy
+        ds_min = self.cfg.step_size
+        if not step_cfg.use_variable_step:
             return ds_min
-        ds_max = float(self.cfg.step_size_max)
-        beta = float(self.cfg.variable_step_beta)
+        ds_max = float(step_cfg.step_size_max)
+        beta = float(step_cfg.variable_step_beta)
         ix, iy = self.map.world_to_grid(pose.x, pose.y)
         if not self.map.in_bounds(ix, iy):
             return ds_min
@@ -183,6 +199,9 @@ class HybridAStarPlannerBase:
         # Approximate dV with dO if GVD distance unavailable: $ds \approx \beta * (d_O + d_V) \approx 2 * \beta * d_O$
         dV = float(self._dV[iy, ix]) if self._dV is not None else dO
         ds = beta * (dO + dV) # equal to $2 \beta * dO$ if dV unavailable
+        #& UPDATE: Additional improvement - reduce step in high-curvature plans to improve local maneuver quality
+        kappa_ratio = min(1.0, abs(float(pose.kappa)) / max(1e-6, float(self.cfg.kappa_max)))
+        ds /= (1.0 + float(step_cfg.curvature_slowdown_gain) * kappa_ratio)
         ds = min(max(ds, ds_min), ds_max) # clamp to [ds_min, ds_max]
         return ds
 
@@ -262,35 +281,36 @@ class HybridAStarPlannerBase:
 
     def _smooth_path(self, path: List[Pose]) -> List[Pose]:
         """ Lightweight post-search smoothing pass on (x,y,theta,kappa) with collision safeguards """
-        if not bool(self.cfg.use_path_smoothing) or len(path) < 5:
+        if not self.cfg.use_path_smoothing or len(path) < 5:
             return path
-        out = list(path)
-        passes = max(1, int(self.cfg.smoothing_passes))
-        w = max(2, int(self.cfg.smoothing_window))
-        for _ in range(passes):
-            changed = False
-            for i in range(1, len(out) - 1):
-                lo = max(0, i - w)
-                hi = min(len(out) - 1, i + w)
-                p_prev = out[lo]
-                p_next = out[hi]
-                # line-search interpolation toward wider-neighborhood chord
-                alpha = 0.15
-                # rotational components are averaged on the unit circle to avoid discontinuities
-                cx = (1.0 - alpha) * out[i].x + alpha * 0.5 * (p_prev.x + p_next.x)
-                cy = (1.0 - alpha) * out[i].y + alpha * 0.5 * (p_prev.y + p_next.y)
-                sth = np.sin(out[i].theta) + alpha * (np.sin(p_prev.theta) + np.sin(p_next.theta))
-                cth = np.cos(out[i].theta) + alpha * (np.cos(p_prev.theta) + np.cos(p_next.theta))
-                th = float(np.arctan2(sth, cth))
-                kappa = float((1.0 - alpha) * out[i].kappa + alpha * 0.5 * (p_prev.kappa + p_next.kappa))
-                kappa = max(-float(self.cfg.kappa_max), min(float(self.cfg.kappa_max), kappa))
-                candidate = Pose(x=float(cx), y=float(cy), theta=th, kappa=kappa)
-                if pose_is_free(candidate, self.map, self.footprint_offsets):
-                    out[i] = candidate
-                    changed = True
-            if not changed:
-                break
-        return out
+        # out = list(path)
+        # passes = max(1, int(self.cfg.smoothing_passes))
+        # w = max(2, int(self.cfg.smoothing_window))
+        # for _ in range(passes):
+        #     changed = False
+        #     for i in range(1, len(out) - 1):
+        #         lo = max(0, i - w)
+        #         hi = min(len(out) - 1, i + w)
+        #         p_prev = out[lo]
+        #         p_next = out[hi]
+        #         # line-search interpolation toward wider-neighborhood chord
+        #         alpha = 0.15
+        #         # rotational components are averaged on the unit circle to avoid discontinuities
+        #         cx = (1.0 - alpha) * out[i].x + alpha * 0.5 * (p_prev.x + p_next.x)
+        #         cy = (1.0 - alpha) * out[i].y + alpha * 0.5 * (p_prev.y + p_next.y)
+        #         sth = np.sin(out[i].theta) + alpha * (np.sin(p_prev.theta) + np.sin(p_next.theta))
+        #         cth = np.cos(out[i].theta) + alpha * (np.cos(p_prev.theta) + np.cos(p_next.theta))
+        #         th = float(np.arctan2(sth, cth))
+        #         kappa = float((1.0 - alpha) * out[i].kappa + alpha * 0.5 * (p_prev.kappa + p_next.kappa))
+        #         kappa = max(-float(self.cfg.kappa_max), min(float(self.cfg.kappa_max), kappa))
+        #         candidate = Pose(x=float(cx), y=float(cy), theta=th, kappa=kappa)
+        #         if pose_is_free(candidate, self.map, self.footprint_offsets):
+        #             out[i] = candidate
+        #             changed = True
+        #     if not changed:
+        #         break
+        # return out
+        return self.refiner.smooth_path(path)
 
 
 
@@ -325,25 +345,6 @@ def planner_factory(
 
 
 class HybridAStarPlannerPython(HybridAStarPlannerBase):
-    def __init__(
-        self,
-        occ_grid: OccupancyGrid,
-        config: PlannerConfig,
-        *,
-        use_rectangle_footprint: bool = True,
-        use_voronoi_edge_cost: bool = True,
-    ):
-        super().__init__(
-            occ_grid,
-            config,
-            use_rectangle_footprint=use_rectangle_footprint,
-            use_voronoi_edge_cost=use_voronoi_edge_cost,
-        )
-        # sets self._use_dense_best_g and initialize best_g accordingly
-        #& UPDATE: removed to keep planner object immutable and thread-safe across calls where possible
-        # self.best_g: Union[np.ndarray, Dict[int, float]] = self._init_best_g()
-
-
     # TODO: consider writing a wrapper class for best_g that abstracts away the dense vs sparse implementation details and provides get/set methods
         # would clean up the code a bit and encapsulate the logic better - could also potentially take over responsibilities of the `Indexer` class
 
@@ -351,7 +352,7 @@ class HybridAStarPlannerPython(HybridAStarPlannerBase):
         # determine whether to use dense best_g array or sparse dict based on grid size
         H, W = self.map.height, self.map.width
         theta_bins, kappa_bins = self.cfg.grid.theta_bins, self.cfg.grid.kappa_bins
-        total_states = int(H) * int(W) * int(theta_bins) * int(kappa_bins)
+        total_states = H * W * theta_bins * kappa_bins
         use_dense_best_g = total_states <= int(self.cfg.dense_best_g_max_states)
         # optionally split by last direction (+1/-1) - tiny overhead and better consistency with switch penalties
         direction_dim = 2 if bool(self.cfg.use_directional_dominance) else 1
@@ -412,7 +413,6 @@ class HybridAStarPlannerPython(HybridAStarPlannerBase):
         # Goal-dependent holonomic-with-obstacles heuristic.
         h2d = self._build_goal_heuristics(goal)
         use_dense_best_g, best_g = self._init_best_g()
-        # total_states = int(h) * int(w) * int(tb) * int(kb)
         # formerly: open set like (f, tie, node_id)
         open_heap: List[Tuple[float, float, int]] = []  # (f, tie_key, node_id)
         nodes: List[HybridNode] = []

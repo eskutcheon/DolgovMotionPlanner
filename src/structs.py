@@ -96,7 +96,6 @@ class PlannerWeights:
     # integrating Voronoi $\rho \in \[0,1\]$ along path edges to prefer paths away from obstacles
     voronoi_weight: float = 0.5  # placeholder weights for later extension
     # steer_change_weight: float = 0.0
-    #& UPDATE: adding curvature change weight penalty
     # curvature-rate penalty (encourages smooth steering evolution without instantaneous jumps)
     kappa_rate_weight: float = 0.05              # weight on $\int u^2 ds$ (for curvature change in the cost function)
     kappa_rate_change_weight: float = 0.5        # weight on $|u - u_prev|$ (optional extra smoothing)
@@ -121,6 +120,50 @@ class ConnectorParams:
 
 
 @dataclass(frozen=True, slots=True)
+class AnalyticScheduleParams:
+    every_n: int = 100
+    max_distance: float = 15.0 # only attempt analytic connection if within this (Euclidean)
+    use_adaptive_schedule: bool = True
+    min_interval: int = 20
+    max_interval: int = 180
+    distance_power: float = 1.5
+
+
+@dataclass(frozen=True, slots=True)
+class StepPolicyParams:
+    # using variable-resolution step (from 2010 paper) - longer arcs in wide-open space / wider Voronoi regions
+    use_variable_step: bool = False #? NOTE: set False for tighter, highly discretized mazes; Set true for large open spaces + sparse obstacles
+    step_size_max: float = 3.0
+    variable_step_beta: float = 0.5 # $ds \approx \beta*(dO + dV)$ - if dV unavailable we approximate with $dO$
+    # curvature-aware down-scaling for tight maneuvers
+    curvature_slowdown_gain: float = 2.5
+
+
+@dataclass(frozen=True, slots=True)
+class PathSmootherParams:
+    # post-search path smoothing parameters
+    smoothing_passes: int = 3
+    smoothing_window: int = 10
+    # objective-based refinement with anchored safety retries
+    use_objective_smoother: bool = True
+    objective_smoothing_iters: int = 24
+    objective_smoothing_lr: float = 0.08
+    objective_smoothing_fd_eps: float = 0.05
+    objective_smoothing_safe_distance_m: float = 1.5
+    smoothing_anchor_rounds: int = 3
+    objective_w_length: float = 0.05
+    objective_w_smooth: float = 0.35
+    objective_w_obstacle: float = 1.0
+    objective_w_curvature: float = 0.5
+    # align smoother objective with Voronoi field when available
+    objective_w_voronoi: float = 0.25
+    # extra performance controls for objective refinement
+    objective_solver_maxiter: int = 30
+    objective_solver_tol: float = 1e-3
+    objective_max_points: int = 120
+
+
+@dataclass(frozen=True, slots=True)
 class PlannerConfig:
     grid: GridSpec
     vehicle: VehicleParams
@@ -128,13 +171,14 @@ class PlannerConfig:
     # voronoi: VoronoiParams = field(default_factory=VoronoiParams)
     voronoi_alpha: float = 1.0
     voronoi_dO_max: float = 5.0
-    # TODO: might want to rename this since it's now only used to set ds
     step_size: float = 1.0          # propagation distance per expansion [m] - should be a multiple of the grid resolution
     n_substeps: int = 5             # collision sampling along edge
     kappa_rate_samples: int = 3     # curvature-rate control samples $u = d\kappa/ds$. Typically 3: [-u_max, 0, +u_max]
     allow_reverse: bool = True
-    analytic_every_n: int = 100
-    analytic_max_distance: float = 15.0    # only attempt analytic connection if within this (Euclidean)
+    #& UPDATE: moved to new AnalyticScheduleParams dataclass
+    # analytic_every_n: int = 100
+    # analytic_max_distance: float = 15.0    # only attempt analytic connection if within this (Euclidean)
+    analytic: AnalyticScheduleParams = field(default_factory=AnalyticScheduleParams)
     # table radius for non-holonomic heuristic (goal-local frame)
     nh_table_xy_radius: float = 20.0
     nh_table_xy_res: float = 1.0
@@ -145,10 +189,8 @@ class PlannerConfig:
     footprint_sample_step: Optional[float] = None
     kappa_max: float = 0.2                  # max curvature $|\kappa|$ (1/meters)
     kappa_rate_max: float = 0.1            # max curvature change per step - $|u| = |\frac{d\kappa}{ds}|$ (1/m^2)
-    # Variable-resolution step (2010 paper: longer arcs in wider Voronoi regions)
-    use_variable_step: bool = False # Set False for tighter, highly discretized mazes; Set true for large open spaces + sparse obstacles
-    step_size_max: float = 3.0
-    variable_step_beta: float = 0.5         # ds ≈ beta*(dO + dV); if dV unavailable we approximate with dO
+    #& UPDATE: moved variable step parameters to new StepPolicyParams dataclass
+    step_policy: StepPolicyParams = field(default_factory=StepPolicyParams)
     # large-grid support - avoids dense best_g if the full 4D lattice is too large
     dense_best_g_max_states: int = 5_000_000
     # keep separate best-g per last-motion direction (+1/-1) while preserving the same hashed state key (x, y, theta, kappa)
@@ -158,10 +200,9 @@ class PlannerConfig:
     # bounded analytic connector (beam search over curvature-rate actions)
     use_analytic_connector: bool = True
     connector: ConnectorParams = field(default_factory=ConnectorParams)
-    # Post-search path smoothing
-    use_path_smoothing: bool = True
-    smoothing_passes: int = 3
-    smoothing_window: int = 10
+    use_path_smoothing: bool = True # knob for post-search path smoothing
+    #& UPDATE: moved path smoother parameters to new PathSmootherParams dataclass
+    smoother: PathSmootherParams = field(default_factory=PathSmootherParams)
 
 
 # TODO: might also want to do away with this one and keep it all in `HybridNode.key` as is currently used
@@ -193,14 +234,14 @@ class HybridNode:
     #& Parent action is kept as an edge attribute (NOT part of the hashed DiscreteKey):
         # direction $\sigma \in \{+1,-1\}$, curvature-rate $u = \frac{d\kappa}{ds}$
     parent_action: Tuple[int, float] = (1, 0.0)  # (direction bit, curvature delta)
-    
-    """
-    Tradeoff (explicit): if we exclude direction from the dominance key, we may prune a state that is geometrically identical
-        but reached with a different last-motion mode. If switch penalties are large, that can change optimality. If this becomes
-        an issue, one solution is to store two best-g values per key internally (one for last sigma = +1 and for -1) without
-        it technically being part of the state key used for hashing/lookup.
-    - Honestly may just want to go rogue and keep it in the state, regardless of what the instructions say, since it makes sense for switch penalties
-    """
+
+#
+# Tradeoff (explicit): if we exclude direction from the dominance key, we may prune a state that is geometrically identical
+#     but reached with a different last-motion mode. If switch penalties are large, that can change optimality. If this becomes
+#     an issue, one solution is to store two best-g values per key internally (one for last sigma = +1 and for -1) without
+#     it technically being part of the state key used for hashing/lookup.
+# - Honestly may just want to go rogue and keep it in the state, regardless of what the instructions say, since it makes sense for switch penalties
+#
 
 
 

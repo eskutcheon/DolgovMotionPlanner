@@ -4,11 +4,7 @@ import math
 
 import numpy as np
 
-from src.models import (
-    HolonomicWithObstacles2D,
-    NonHolonomicWithoutObstaclesTable,
-    OccupancyGrid,
-)
+from src.models import OccupancyGrid, HolonomicWithObstacles2D, NonHolonomicWithoutObstaclesTable
 from src.structs import GridSpec, PlannerConfig, VehicleParams, Pose
 from src.utils import compute_distance_to_obstacles_m, compute_gvd_distance_m
 

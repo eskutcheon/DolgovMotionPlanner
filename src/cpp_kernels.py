@@ -10,7 +10,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 # local module imports
 from src.structs import Pose, GoalSpec, PlannerConfig, PlannerStats
-from src.models import OccupancyGrid
+from src.models.models import OccupancyGrid
 
 try:
     import hybrid_core  # type: ignore

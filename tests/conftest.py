@@ -46,7 +46,7 @@ def planner_config(grid_spec, vehicle_params):
 
 @pytest.fixture
 def empty_grid(grid_spec):
-    from src.models import OccupancyGrid
+    from src.models.models import OccupancyGrid
     occ = np.zeros((60, 60), dtype=bool)
     return OccupancyGrid(occ, grid_spec)
 
@@ -54,7 +54,7 @@ def empty_grid(grid_spec):
 @pytest.fixture
 def grid_with_wall(grid_spec):
     """ A grid with a vertical wall and a gap. """
-    from src.models import OccupancyGrid
+    from src.models.models import OccupancyGrid
     occ = np.zeros((60, 60), dtype=bool)
     # Wall at x=30 with a gap at y in [28,32]
     occ[:, 30] = True
@@ -89,7 +89,7 @@ def hard_maze_file() -> Path:
 @pytest.fixture
 def maze_grid_and_poses(grid_spec, easy_maze_file: Path) -> Tuple[Any, List[float], List[float]]:
     """ A grid with predefined obstacles for deterministic tests """
-    from src.models import OccupancyGrid
+    from src.models.models import OccupancyGrid
     # maze_file = get_random_maze_file()
     maze_file = easy_maze_file
     # maze_file = hard_maze_file

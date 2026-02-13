@@ -32,6 +32,11 @@ def clamp(x: float, lo: float, hi: float) -> float:
     """ general utility for other float clamping """
     return lo if x < lo else hi if x > hi else x
 
+def kappa_to_bin(kappa: float, kappa_min: float, kappa_max: float, dkappa: float, kappa_bins: int) -> int:
+    """ Map curvature to bin index """
+    k = max(kappa_min, min(kappa_max, kappa))
+    bin_idx = int(math.floor((k - kappa_min) / dkappa))
+    return min(max(bin_idx, 0), kappa_bins - 1)
 
 
 def generate_random_maze_grid(width: int, height: int, obstacle_prob: float = 0.1, seed: Optional[int] = None) -> np.ndarray:
