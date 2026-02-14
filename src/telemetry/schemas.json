@@ -1,0 +1,127 @@
+{
+    "RAW_MCAP": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "PlannerMarkers",
+        "type": "object",
+        "required": ["tick", "markers"],
+        "properties": {
+            "tick": {
+                "type": "object",
+                "required": [
+                    "iteration", "time_s", "expanded", "pushed", "open_size",
+                    "collision_checks", "failed_rollouts", "best_f", "best_g"
+                ],
+                "properties": {
+                    "iteration": {"type": "integer"},
+                    "time_s": {"type": "number"},
+                    "expanded": {"type": "integer"},
+                    "pushed": {"type": "integer"},
+                    "open_size": {"type": "integer"},
+                    "collision_checks": {"type": "integer"},
+                    "failed_rollouts": {"type": "integer"},
+                    "best_f": {"type": "number"},
+                    "best_g": {"type": "number"}
+                },
+                "additionalProperties": true
+            },
+            "markers": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["namespace", "type", "scale", "color"],
+                    "properties": {
+                        "namespace": {"type": "string"},
+                        "type": {"type": "string", "enum": ["SPHERE", "LINE_STRIP", "POINTS"]},
+                        "pose": {
+                            "type": "object",
+                            "properties": {
+                                "x": {"type": "number"},
+                                "y": {"type": "number"},
+                                "z": {"type": "number"}
+                            },
+                            "required": ["x", "y", "z"],
+                            "additionalProperties": false
+                        },
+                        "points": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "x": {"type": "number"},
+                                    "y": {"type": "number"},
+                                    "z": {"type": "number"}
+                                },
+                                "required": ["x", "y", "z"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "scale": {
+                            "type": "object",
+                            "properties": {
+                                "x": {"type": "number"},
+                                "y": {"type": "number"},
+                                "z": {"type": "number"}
+                            },
+                            "additionalProperties": false
+                        },
+                        "color": {
+                            "type": "object",
+                            "required": ["r", "g", "b", "a"],
+                            "properties": {
+                                "r": {"type": "number"},
+                                "g": {"type": "number"},
+                                "b": {"type": "number"},
+                                "a": {"type": "number"}
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "allOf": [
+                        {"if": {"properties": {"type": {"const": "SPHERE"}}},
+                        "then": {"required": ["pose"]}},
+                        {"if": {"properties": {"type": {"const": "LINE_STRIP"}}},
+                        "then": {"required": ["points"]}},
+                        {"if": {"properties": {"type": {"const": "POINTS"}}},
+                        "then": {"required": ["points"]}}
+                    ],
+                    "additionalProperties": true
+                }
+            }
+        }
+    },
+
+    "FOXGLOVE": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "PlannerMarkers",
+        "type": "object",
+        "required": ["tick", "markers"],
+        "properties": {
+            "tick": { "type": "object" },
+            "markers": {
+            "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["namespace", "type"],
+                    "properties": {
+                    "namespace": { "type": "string" },
+                    "type": { "type": "string" },
+                    "pose": {
+                        "type": "object",
+                        "properties": { "x": { "type": "number" }, "y": { "type": "number" }, "z": { "type": "number" } }
+                    },
+                    "points": {
+                        "type": "array",
+                        "items": {
+                        "type": "object",
+                        "properties": { "x": { "type": "number" }, "y": { "type": "number" }, "z": { "type": "number" } }
+                        }
+                    },
+                    "scale": { "type": "object" },
+                    "color": { "type": "object" }
+                    },
+                    "additionalProperties": true
+                }
+            }
+        }
+    }
+}

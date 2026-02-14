@@ -30,44 +30,40 @@ NOTE: initial version roughly implemented the approach from the 2008 paper witho
 From the repo root (`DolgovMotionPlanner`):
 
 1. Create a virtual environment using Python's `venv`:
-
 ```bash
 python -m venv .env
 ```
 
 2. Activate the virtual environment:
-
-a. For Linux users:
-
-```bash
-source .env/bin/activate
-```
-
-b. For Windows users:
-
-```bash
-.env/Scripts/activate
-```
+    a. For Linux users:
+    ```bash
+        source .env/bin/activate
+    ```
+    b. For Windows users:
+    ```bash
+        .env/Scripts/activate
+    ```
 
 3. Finish environment setup and run initial tests with `pytest`:
+    a. Python only:
+    ```bash
+        python -m pip install -U pip
+        pip install -e .
+        pytest -v
+    ```
+    b. Optional C++ backend:
+    ```bash
+        python -m pip install -U pip
+        pip install -e ".[cpp]"
+        $env:DOLGOV_BUILD_CPP="1" # on Linux: export DOLGOV_BUILD_CPP="1"
+        pip install -e . -v
+        pytest -m cpp
+    ```
+    c. Optional Visualization + MCAP/JSON export utilities
+    ```bash
+        pip install -e ".[viz]"
+    ```
 
-a. Python only:
-
-```bash
-python -m pip install -U pip
-pip install -e .
-pytest -v
-```
-
-b. Optional C++ backend:
-
-```bash
-python -m pip install -U pip
-pip install -e ".[cpp]"
-$env:DOLGOV_BUILD_CPP="1" # on Linux: export DOLGOV_BUILD_CPP="1"
-pip install -e . -v
-pytest -m cpp
-```
 
 ### Troubleshooting
 
@@ -114,6 +110,32 @@ The physical vehicle parameters are included as the global constants below. Refe
 | `width`                              |                 $W$ | rectangle width                     | collision footprint                   | Const          | ~1.6–2.2 m                         |
 | `front_overhang`                     |                   — | axle -> front bumper                | footprint length                      | Const          | ~0.6–1.2 m                         |
 | `rear_overhang`                      |                   — | axle -> rear bumper                 | footprint length                      | Const          | ~0.6–1.2 m                         |
+
+
+### Planner tick telemetry and marker export (Python planner)
+
+The Python planner loop now accepts an optional tick callback:
+
+```python
+    from src.telemetry.telemetry import JsonlTickSink, McapTickSink
+
+    jsonl_sink = JsonlTickSink("artifacts/planner_ticks.jsonl")
+    path, stats = planner.plan(start, goal, tick_callback=jsonl_sink, tick_stride=25)
+
+    mcap_sink = McapTickSink("artifacts/planner_ticks.mcap")
+    path, stats = planner.plan(start, goal, tick_callback=mcap_sink, tick_stride=25)
+    mcap_sink.close()
+```
+
+Each emitted tick includes:
+  - frontier/search counters (expanded, pushed, open size)
+  - collision metrics (collision checks, failed rollouts)
+  - the current pose and the current best frontier pose
+  - a reconstructed trajectory-to-current-node
+
+`src.telemetry.telemetry.tick_to_markers` converts each tick into marker-like payloads (`planner/current`, `planner/best`, `planner/trajectory`, `planner/explored`, `planner/collisions`).
+
+Use `McapTickSink` or the helper function `write_ticks_mcap` for direct MCAP generation, or `JsonlTickSink` for offline conversion workflows.
 
 
 

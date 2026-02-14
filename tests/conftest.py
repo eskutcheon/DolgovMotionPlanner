@@ -123,3 +123,31 @@ def cpp_available() -> bool:
         return bool(CPP_AVAILABLE)
     except Exception:
         return False
+
+#!! TEMPORARY - remove later - just want to view the MCAP rather than throwing it away after the test
+@pytest.fixture
+def tmp_path() -> Path:
+    out_dir = Path("outputs")
+    out_dir.mkdir(exist_ok=True)
+    return out_dir
+
+
+@pytest.fixture
+def sample_tick():
+    from src.structs import PlannerTick, Pose
+    return PlannerTick(
+        iteration=10,
+        time_s=0.25,
+        expanded=10,
+        pushed=25,
+        open_size=7,
+        collision_checks=42,
+        failed_rollouts=3,
+        best_f=4.0,
+        best_g=2.5,
+        pose=Pose(1.0, 2.0, 0.1, 0.0),
+        best_pose=Pose(1.5, 2.5, 0.2, 0.0),
+        trajectory=[Pose(0.0, 0.0, 0.0, 0.0), Pose(1.0, 2.0, 0.1, 0.0)],
+        explored_poses=[Pose(1.0, 2.0, 0.1, 0.0), Pose(1.1, 2.1, 0.1, 0.0)],
+        collision_poses=[Pose(2.0, 3.0, 0.1, 0.0)],
+    )

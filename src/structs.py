@@ -1,6 +1,6 @@
-
+# src/structs.py
 from dataclasses import dataclass, asdict, field
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple, List
 import math
 
 
@@ -253,8 +253,14 @@ class PlannerStats:
     expanded: int = 0
     pushed: int = 0
     collision_checks: int = 0
+    failed_rollouts: int = 0
+    dominated_skips: int = 0
+    out_of_bounds_skips: int = 0
+    goal_checks: int = 0
     analytic_attempts: int = 0
     analytic_successes: int = 0
+    ticks_emitted: int = 0
+    max_open_size: int = 0
     start_time_s: float = 0.0
     end_time_s: float = 0.0
 
@@ -268,11 +274,25 @@ class PlannerStats:
 
 @dataclass(slots=True)
 class PlannerTick:
+    iteration: int
+    time_s: float
     expanded: int
+    pushed: int
     open_size: int
+    collision_checks: int
+    failed_rollouts: int
     best_f: float
     best_g: float
     pose: Pose
+    best_pose: Pose
+    trajectory: List[Pose]
+    explored_poses: List[Pose]
+    collision_poses: List[Pose]
 
+    def to_dict(self) -> dict:
+        return asdict(self)
 
-TickCallback = Callable[[PlannerTick], None]
+    def to_scalar_dict(self) -> dict:
+        """ return just the scalar fields for stats/debug view (exclude poses/trajectory) """
+        # not sure if this is slower, but it should work:
+        return {k: v for k, v in asdict(self).items() if isinstance(v, (int, float))}

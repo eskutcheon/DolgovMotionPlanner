@@ -1,12 +1,12 @@
+# src/planners.py
+# TODO: will be splitting this file into several new files in a new `planners` module later
 
-
-
-from typing import Dict, List, Optional, Tuple, Literal, Union, TypeAlias
+from typing import Dict, List, Optional, Tuple, Literal, Union, TypeAlias, Callable
 import heapq
 import time
 import numpy as np
 # local module imports
-from src.structs import Pose, GoalSpec, PlannerStats, HybridNode, PlannerConfig, DiscreteKey #, PlannerTick, TickCallback
+from src.structs import Pose, GoalSpec, PlannerStats, HybridNode, PlannerConfig, DiscreteKey, PlannerTick
 from src.models import *
 from src.utils import (
     SQRT2, wrap_angle, pose_is_free, compute_distance_to_obstacles_m, make_rectangle_footprint_offsets,
@@ -20,11 +20,74 @@ except Exception:  # pragma: no cover
     run_search_cpp = None  # type: ignore
 
 
-
+# planner tick callback type alias for telemetry integration - accepts a PlannerTick object containing the current search state and statistics, and returns None
+TickCallback: TypeAlias = Callable[[PlannerTick], None]
 # type alias for the best-g structure, which can be either a dense numpy array or a sparse dict depending on the configuration
 BestGType: TypeAlias = Union[np.ndarray, Dict[Tuple[int, int], float]]
 # stores the current frontier of the analytic beam search, sorted by a terminal score that combines distance to goal with heuristic guidance
 SearchFrontierType: TypeAlias = List[Tuple[float, Pose, List[Pose], int, float, float]]
+
+
+
+class PlannerEventStream:
+    """ small event collector for planner stats and optional tick snapshots """
+    def __init__(self, stats: PlannerStats, start_time_s: float, callback: Optional[TickCallback], stride: int):
+        self.stats = stats
+        self.start_time_s = float(start_time_s)
+        self.callback = callback
+        self.stride = max(1, int(stride))
+        self.explored_since_tick: List[Pose] = []
+        self.collisions_since_tick: List[Pose] = []
+
+    def on_expand(self, pose: Pose, open_size: int) -> None:
+        self.stats.expanded += 1
+        self.stats.goal_checks += 1
+        self.stats.max_open_size = max(self.stats.max_open_size, int(open_size))
+        self.explored_since_tick.append(pose)
+
+    def on_push(self) -> None:
+        self.stats.pushed += 1
+
+    def on_rollout_attempt(self, n_substeps: int) -> None:
+        self.stats.collision_checks += int(n_substeps)
+
+    def on_rollout_failure(self, pose: Pose) -> None:
+        self.stats.failed_rollouts += 1
+        self.collisions_since_tick.append(pose)
+
+    def emit_tick(self, *, force: bool, best_node: HybridNode, cur_pose: Pose, trajectory: List[Pose], open_size: int) -> None:
+        if any((
+            self.callback is None,
+            (not force and (self.stats.expanded % self.stride) != 0),
+            (force and not (self.explored_since_tick or self.collisions_since_tick))
+        )):
+            return
+        self.callback(
+            PlannerTick(
+                iteration=self.stats.expanded,
+                time_s=time.perf_counter() - self.start_time_s,
+                expanded=self.stats.expanded,
+                pushed=self.stats.pushed,
+                open_size=int(open_size),
+                collision_checks=self.stats.collision_checks,
+                failed_rollouts=self.stats.failed_rollouts,
+                best_f=float(best_node.f),
+                best_g=float(best_node.g),
+                pose=cur_pose,
+                best_pose=best_node.pose,
+                trajectory=trajectory,
+                explored_poses=list(self.explored_since_tick),
+                collision_poses=list(self.collisions_since_tick),
+            )
+        )
+        self.explored_since_tick.clear()
+        self.collisions_since_tick.clear()
+        self.stats.ticks_emitted += 1
+
+
+
+
+
 
 
 
@@ -91,7 +154,10 @@ class HybridAStarPlannerBase:
         self._nonhol.build_offline()
 
 
-    def plan(self, start: Pose, goal: GoalSpec, *, max_expansions: int = 200_000) -> Tuple[List[Pose], PlannerStats]:
+    def plan(
+        self, start: Pose, goal: GoalSpec, *, max_expansions: int = 200_000,
+        tick_callback: Optional[TickCallback] = None, tick_stride: int = 100,
+    ) -> Tuple[List[Pose], PlannerStats]:
         raise NotImplementedError("HybridAStarPlannerBase is an abstract base class; subclasses should implement plan()")
 
 
@@ -104,6 +170,7 @@ class HybridAStarPlannerBase:
     def _build_goal_heuristics(self, goal: GoalSpec) -> HolonomicWithObstacles2D:
         # h2d = HolonomicWithObstacles2D(self.map, cost_per_cell=self._rho, dO_m=self._dO, min_clearance_m=self._gate_radius_m)
         # for mazes/corridors, don't prune cells by circumscribed radius here; let the continuous collision checker handle feasibility
+            #? NOTE: test with `test_python_backend_can_pass_through_gap`
         h2d = HolonomicWithObstacles2D(self.map, cost_per_cell=self._rho, dO_m=self._dO, min_clearance_m=0.0)
         h2d.compute(goal.pose)
         return h2d
@@ -118,7 +185,6 @@ class HybridAStarPlannerBase:
         # early exit on theta tolerance, so final check is for kappa
         if abs(dth) > goal.theta_tol:
             return False
-        # return abs(dth) <= goal.theta_tol
         dkappa = pose.kappa - goal.pose.kappa
         return abs(dkappa) <= goal.kappa_tol
 
@@ -228,7 +294,32 @@ class HybridAStarPlannerBase:
         return score + 0.1 * self._heuristic(pose, goal, h2d)
 
 
-    def _try_goal_shot(self, start_pose: Pose, goal: GoalSpec, h2d: HolonomicWithObstacles2D) -> Optional[List[Pose]]:
+    def _rollout_kinematic_model(
+        self,
+        pose: Pose,
+        u: float,
+        direction: int,
+        ds: float,
+        *,
+        rho: Optional[np.ndarray],
+        events: Optional[PlannerEventStream],
+    ) -> Optional[Tuple[Pose, float]]:
+        if events is not None:
+            events.on_rollout_attempt(self.cfg.n_substeps)
+        result = self.model.rollout(
+            pose, u, direction, ds, self.cfg.n_substeps,
+            self.cfg.kappa_max, self.map, self.footprint_offsets,
+            dO_m=self._dO, gate_radius_m=self._gate_radius_m, exact_check_margin_m=self._exact_margin_m,
+            footprint_cache=self._footprint_cache, theta_bins=self.cfg.grid.theta_bins,
+            rho=rho,
+        )
+        if result is None and events is not None:
+            events.on_rollout_failure(pose)
+        return result
+
+
+    #! FIXME: not in line with the stats and planner tick classes
+    def _try_goal_shot(self, start_pose: Pose, goal: GoalSpec, h2d: HolonomicWithObstacles2D, events: Optional[PlannerEventStream] = None) -> Optional[List[Pose]]:
         r""" Fast 'analytic-like' attempt: greedily roll out a short sequence of $(\sigma,u)$ to reach the goal tolerance """
         horizon = max(4, int(self.cfg.connector.connector_horizon))
         beam_width = max(2, int(self.cfg.connector.connector_beam_width))
@@ -250,13 +341,7 @@ class HybridAStarPlannerBase:
                 ds = min(self._select_step(cur), max(float(self.cfg.step_size), goal_dist))
                 for direction in directions:
                     for u in self.u_set:
-                        rollout_result = self.model.rollout(
-                            cur, float(u), int(direction), float(ds), int(self.cfg.n_substeps),
-                            float(self.cfg.kappa_max), self.map, self.footprint_offsets,
-                            dO_m=self._dO, gate_radius_m=self._gate_radius_m, exact_check_margin_m=self._exact_margin_m,
-                            footprint_cache=self._footprint_cache, theta_bins=int(self.cfg.grid.theta_bins),
-                            rho=None,
-                        )
+                        rollout_result = self._rollout_kinematic_model(cur, u, direction, ds, rho=None, events=events)
                         if rollout_result is None:
                             continue
                         nxt, rho_int = rollout_result
@@ -283,33 +368,6 @@ class HybridAStarPlannerBase:
         """ Lightweight post-search smoothing pass on (x,y,theta,kappa) with collision safeguards """
         if not self.cfg.use_path_smoothing or len(path) < 5:
             return path
-        # out = list(path)
-        # passes = max(1, int(self.cfg.smoothing_passes))
-        # w = max(2, int(self.cfg.smoothing_window))
-        # for _ in range(passes):
-        #     changed = False
-        #     for i in range(1, len(out) - 1):
-        #         lo = max(0, i - w)
-        #         hi = min(len(out) - 1, i + w)
-        #         p_prev = out[lo]
-        #         p_next = out[hi]
-        #         # line-search interpolation toward wider-neighborhood chord
-        #         alpha = 0.15
-        #         # rotational components are averaged on the unit circle to avoid discontinuities
-        #         cx = (1.0 - alpha) * out[i].x + alpha * 0.5 * (p_prev.x + p_next.x)
-        #         cy = (1.0 - alpha) * out[i].y + alpha * 0.5 * (p_prev.y + p_next.y)
-        #         sth = np.sin(out[i].theta) + alpha * (np.sin(p_prev.theta) + np.sin(p_next.theta))
-        #         cth = np.cos(out[i].theta) + alpha * (np.cos(p_prev.theta) + np.cos(p_next.theta))
-        #         th = float(np.arctan2(sth, cth))
-        #         kappa = float((1.0 - alpha) * out[i].kappa + alpha * 0.5 * (p_prev.kappa + p_next.kappa))
-        #         kappa = max(-float(self.cfg.kappa_max), min(float(self.cfg.kappa_max), kappa))
-        #         candidate = Pose(x=float(cx), y=float(cy), theta=th, kappa=kappa)
-        #         if pose_is_free(candidate, self.map, self.footprint_offsets):
-        #             out[i] = candidate
-        #             changed = True
-        #     if not changed:
-        #         break
-        # return out
         return self.refiner.smooth_path(path)
 
 
@@ -347,7 +405,6 @@ def planner_factory(
 class HybridAStarPlannerPython(HybridAStarPlannerBase):
     # TODO: consider writing a wrapper class for best_g that abstracts away the dense vs sparse implementation details and provides get/set methods
         # would clean up the code a bit and encapsulate the logic better - could also potentially take over responsibilities of the `Indexer` class
-
     def _init_best_g(self) -> Tuple[bool, BestGType]:
         # determine whether to use dense best_g array or sparse dict based on grid size
         H, W = self.map.height, self.map.width
@@ -383,9 +440,10 @@ class HybridAStarPlannerPython(HybridAStarPlannerBase):
 
 
     def _attempt_analytic_connection(
-        self, cur: HybridNode, goal: GoalSpec, h2d: HolonomicWithObstacles2D, nodes: List[HybridNode], nid: int, *, verbose=False
+        self, cur: HybridNode, goal: GoalSpec, h2d: HolonomicWithObstacles2D, nodes: List[HybridNode], nid: int, *,
+        verbose=False, events: Optional[PlannerEventStream] = None,
     ) -> Tuple[Optional[List[Pose]], bool]:
-        shot: Optional[List[Pose]] = self._try_goal_shot(cur.pose, goal, h2d)
+        shot: Optional[List[Pose]] = self._try_goal_shot(cur.pose, goal, h2d, events=events)
         if shot is None:
             return None, False # return no path and success=False
         # splice shot onto reconstructed prefix
@@ -406,29 +464,31 @@ class HybridAStarPlannerPython(HybridAStarPlannerBase):
         goal: GoalSpec,
         *,
         max_expansions: int = 200_000,
+        tick_callback: Optional[TickCallback] = None,
+        tick_stride: int = 100,
     ) -> Tuple[List[Pose], PlannerStats]:
         stats = PlannerStats()
-        # TODO: if `stats` is kept, might wanna make a `PlannerStatsContext` to compute benchmarking (timing, etc) within a context manager for a more callback-like design
         stats.start_time_s = time.perf_counter()
+        events = PlannerEventStream(stats, stats.start_time_s, tick_callback, tick_stride)
         # Goal-dependent holonomic-with-obstacles heuristic.
         h2d = self._build_goal_heuristics(goal)
         use_dense_best_g, best_g = self._init_best_g()
-        # formerly: open set like (f, tie, node_id)
-        open_heap: List[Tuple[float, float, int]] = []  # (f, tie_key, node_id)
+        open_heap: List[Tuple[float, float, int]] = []  # open set with keys (f, tie_key, node_id)
         nodes: List[HybridNode] = []
-        start_key = self.indexer.pose_to_key(start) #, direction=+1)
-        if not self.map.in_bounds(start_key.ix, start_key.iy) or not self._pose_is_free_fast(start): #, self.map, self.footprint_offsets):
+        start_key = self.indexer.pose_to_key(start)
+        if not self.map.in_bounds(start_key.ix, start_key.iy) or not self._pose_is_free_fast(start):
             stats.end_time_s = time.perf_counter()
             print("\n[WARNING] Start pose is in collision or out of bounds; returning no path.")
             return [], stats
         h0 = self._heuristic(start, goal, h2d)
         n0 = HybridNode(key=start_key, pose=start, g=0.0, h=h0, f=h0, parent_id=-1, parent_action=(+1, 0.0))
         nodes.append(n0)
-        #& UPDATE: using new best_g update and check functions that handle both dense and sparse cases, as well as directional dominance if enabled
+        # update best-g for the start node before pushing to open set
         self._update_best_g(best_g, use_dense_best_g, start_key, 0.0, +1)
         tie0 = -n0.g if bool(self.cfg.prefer_larger_g_tiebreak) else 0.0
         heapq.heappush(open_heap, (n0.f, tie0, 0))
-        stats.pushed += 1
+        # stats.pushed += 1
+        events.on_push()
         best_h_nid = 0
         best_h_val = n0.h
         while open_heap and stats.expanded < int(max_expansions):
@@ -437,16 +497,21 @@ class HybridAStarPlannerPython(HybridAStarPlannerBase):
             k = cur.key
             # dominance check: skip if no improvement
             if not self.map.in_bounds(k.ix, k.iy) or not self._is_better_g(best_g, use_dense_best_g, k, cur.g, cur.parent_action[0]):
+                stats.dominated_skips += 1
                 continue
-            stats.expanded += 1
+            events.on_expand(cur.pose, len(open_heap))
+            # if this node has the best h so far, save it for a potential last-chance analytic connection at the end (helps in sparse/open maps)
             if cur.h < best_h_val:
                 best_h_val = float(cur.h)
                 best_h_nid = int(nid)
+            best_node = nodes[best_h_nid] # aliasing for better readability in tick callback
+            cur_traj = self._reconstruct(nodes, nid) # to reuse in tick callback without reconstructing multiple times per expansion
+            events.emit_tick(force=False, best_node=best_node, cur_pose=cur.pose, trajectory=cur_traj, open_size=len(open_heap))
             # goal check for early exit
             if self._goal_reached(cur.pose, goal):
+                events.emit_tick(force=True, best_node=best_node, cur_pose=cur.pose, trajectory=cur_traj, open_size=len(open_heap))
                 stats.end_time_s = time.perf_counter()
-                # path: List[Pose] = self._reconstruct(nodes, nid)
-                path: List[Pose] = self._smooth_path(self._reconstruct(nodes, nid))
+                path: List[Pose] = self._smooth_path(cur_traj)
                 if path and not self._validate_path_exact(path, verbose=True):
                     print("\n[WARNING] Goal reached but final path failed exact collision check; returning no path.")
                     return [], stats
@@ -454,34 +519,31 @@ class HybridAStarPlannerPython(HybridAStarPlannerBase):
                     print("\n[WARNING] Goal reached but failed to reconstruct path; returning no path.")
                 return path, stats
             if self._should_try_analytic(cur.pose, goal.pose, stats.expanded):
+                # TODO: feel like it might be worth building a queue of fields to increment and passing it to stats as keywords
                 stats.analytic_attempts += 1
-                shot_path, success = self._attempt_analytic_connection(cur, goal, h2d, nodes, nid)
+                shot_path, success = self._attempt_analytic_connection(cur, goal, h2d, nodes, nid, events=events)
                 # if a shot was found, either restart loop and skip this node (if validation failed) or return path
                 if shot_path is not None:
                     if not success:
                         continue
                     stats.analytic_successes += 1
+                    events.emit_tick(force=True, best_node=best_node, cur_pose=cur.pose, trajectory=cur_traj, open_size=len(open_heap))
                     stats.end_time_s = time.perf_counter()
                     return shot_path, stats
             prev_dir, prev_u = cur.parent_action
-            # expand children via ~~discrete steering~~ curvature-rate controls and direction
+            # expand children via curvature-rate controls and direction
             directions = (+1, -1) if self.cfg.allow_reverse else (+1,)
             for direction in directions:
                 ds = self._select_step(cur.pose)
                 # for steer in self.steer_set:
                 for u in self.u_set:
-                    res = self.model.rollout(
-                        cur.pose, u, direction, ds,
-                        int(self.cfg.n_substeps), self.cfg.kappa_max, self.map, self.footprint_offsets,
-                        dO_m=self._dO, theta_bins=int(self.cfg.grid.theta_bins), rho=self._rho,
-                        gate_radius_m=self._gate_radius_m, exact_check_margin_m=self._exact_margin_m, footprint_cache=self._footprint_cache,
-                    )
-                    stats.collision_checks += int(self.cfg.n_substeps) # += 1
+                    res = self._rollout_kinematic_model(cur.pose, u, direction, ds, rho=self._rho, events=events)
                     if res is None:
                         continue
                     nxt_pose, rho_int = res
-                    nxt_key = self.indexer.pose_to_key(nxt_pose) #, direction)
+                    nxt_key = self.indexer.pose_to_key(nxt_pose)
                     if not self.map.in_bounds(nxt_key.ix, nxt_key.iy):
+                        stats.out_of_bounds_skips += 1
                         continue
                     # cost: length + direction penalties + optional Voronoi integral
                     g2 = cur.g + self._edge_cost(ds, direction, prev_dir, float(u), float(prev_u), float(rho_int))
@@ -491,16 +553,21 @@ class HybridAStarPlannerPython(HybridAStarPlannerBase):
                     h2 = self._heuristic(nxt_pose, goal, h2d)
                     n2 = HybridNode(key=nxt_key, pose=nxt_pose, parent_id=nid, g=g2, h=h2, f = g2 + h2, parent_action=(direction, u))
                     nodes.append(n2)
-                    # self._update_best_g(nxt_key, g2)
-                    # heapq.heappush(open_heap, (n2.f, len(nodes) - 1))
                     self._update_best_g(best_g, use_dense_best_g, nxt_key, g2, direction)
                     tie = -n2.g if bool(self.cfg.prefer_larger_g_tiebreak) else 0.0
                     heapq.heappush(open_heap, (n2.f, tie, len(nodes) - 1))
-                    stats.pushed += 1
+                    events.on_push()
         # last-chance bounded connector from best frontier node (helps sparse/open maps)
         if self.cfg.use_analytic_connector and 0 <= best_h_nid < len(nodes):
-            shot_path, success = self._attempt_analytic_connection(nodes[best_h_nid], goal, h2d, nodes, best_h_nid, verbose=True)
+            shot_path, success = self._attempt_analytic_connection(nodes[best_h_nid], goal, h2d, nodes, best_h_nid, verbose=True, events=events)
             if shot_path and success:
+                events.emit_tick(
+                    force=True,
+                    best_node=nodes[best_h_nid],
+                    cur_pose=nodes[best_h_nid].pose,
+                    trajectory=self._reconstruct(nodes, best_h_nid),
+                    open_size=len(open_heap)
+                )
                 stats.end_time_s = time.perf_counter()
                 return shot_path, stats
         stats.end_time_s = time.perf_counter()
@@ -535,7 +602,11 @@ class HybridAStarPlannerCpp(HybridAStarPlannerBase):
         goal: GoalSpec,
         *,
         max_expansions: int = 200_000,
+        tick_callback: Optional[TickCallback] = None,
+        tick_stride: int = 100,
     ) -> Tuple[List[Pose], PlannerStats]:
+        if tick_callback is not None:
+            RuntimeError("[ERROR] tick_callback is currently only supported in the Python planner loop.")
         stats = PlannerStats()
         stats.start_time_s = time.perf_counter()
         # Goal-dependent holonomic-with-obstacles heuristic.
