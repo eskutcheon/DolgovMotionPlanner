@@ -38,6 +38,8 @@ class PlannerEventStream:
         self.stride = max(1, int(stride))
         self.explored_since_tick: List[Pose] = []
         self.collisions_since_tick: List[Pose] = []
+        self.pruned_trajectories_since_tick: List[List[Pose]] = []
+        self.latest_analytic_shot: List[Pose] = []
 
     def on_expand(self, pose: Pose, open_size: int) -> None:
         self.stats.expanded += 1
@@ -55,7 +57,14 @@ class PlannerEventStream:
         self.stats.failed_rollouts += 1
         self.collisions_since_tick.append(pose)
 
-    def emit_tick(self, *, force: bool, best_node: HybridNode, cur_pose: Pose, trajectory: List[Pose], open_size: int) -> None:
+    def on_pruned_trajectory(self, path: List[Pose]) -> None:
+        if len(path) >= 2:
+            self.pruned_trajectories_since_tick.append(path)
+
+    def on_analytic_shot(self, path: Optional[List[Pose]]) -> None:
+        self.latest_analytic_shot = list(path) if path else []
+
+    def emit_tick(self, force: bool, best_node: HybridNode, cur_pose: Pose, trajectory: List[Pose], open_size: int) -> None:
         if any((
             self.callback is None,
             (not force and (self.stats.expanded % self.stride) != 0),
@@ -78,10 +87,14 @@ class PlannerEventStream:
                 trajectory=trajectory,
                 explored_poses=list(self.explored_since_tick),
                 collision_poses=list(self.collisions_since_tick),
+                pruned_trajectories=list(self.pruned_trajectories_since_tick),
+                analytic_shot=list(self.latest_analytic_shot),
             )
         )
         self.explored_since_tick.clear()
         self.collisions_since_tick.clear()
+        self.pruned_trajectories_since_tick.clear()
+        # self.latest_analytic_shot.clear()
         self.stats.ticks_emitted += 1
 
 
@@ -107,7 +120,6 @@ class HybridAStarPlannerBase:
         self,
         occ_grid: OccupancyGrid,
         config: PlannerConfig,
-        *,
         use_rectangle_footprint: bool = True,
         use_voronoi_edge_cost: bool = True,
     ):
@@ -155,7 +167,7 @@ class HybridAStarPlannerBase:
 
 
     def plan(
-        self, start: Pose, goal: GoalSpec, *, max_expansions: int = 200_000,
+        self, start: Pose, goal: GoalSpec, max_expansions: int = 200_000,
         tick_callback: Optional[TickCallback] = None, tick_stride: int = 100,
     ) -> Tuple[List[Pose], PlannerStats]:
         raise NotImplementedError("HybridAStarPlannerBase is an abstract base class; subclasses should implement plan()")
@@ -300,7 +312,6 @@ class HybridAStarPlannerBase:
         u: float,
         direction: int,
         ds: float,
-        *,
         rho: Optional[np.ndarray],
         events: Optional[PlannerEventStream],
     ) -> Optional[Tuple[Pose, float]]:
@@ -375,7 +386,6 @@ class HybridAStarPlannerBase:
 def planner_factory(
     occ_grid: OccupancyGrid,
     config: PlannerConfig,
-    *,
     backend: Literal["python", "cpp"] = "python",
     use_rectangle_footprint: bool = True,
     use_voronoi_edge_cost: bool = True,
@@ -440,7 +450,7 @@ class HybridAStarPlannerPython(HybridAStarPlannerBase):
 
 
     def _attempt_analytic_connection(
-        self, cur: HybridNode, goal: GoalSpec, h2d: HolonomicWithObstacles2D, nodes: List[HybridNode], nid: int, *,
+        self, cur: HybridNode, goal: GoalSpec, h2d: HolonomicWithObstacles2D, nodes: List[HybridNode], nid: int,
         verbose=False, events: Optional[PlannerEventStream] = None,
     ) -> Tuple[Optional[List[Pose]], bool]:
         shot: Optional[List[Pose]] = self._try_goal_shot(cur.pose, goal, h2d, events=events)
@@ -462,7 +472,6 @@ class HybridAStarPlannerPython(HybridAStarPlannerBase):
         self,
         start: Pose,
         goal: GoalSpec,
-        *,
         max_expansions: int = 200_000,
         tick_callback: Optional[TickCallback] = None,
         tick_stride: int = 100,
@@ -524,6 +533,7 @@ class HybridAStarPlannerPython(HybridAStarPlannerBase):
                 shot_path, success = self._attempt_analytic_connection(cur, goal, h2d, nodes, nid, events=events)
                 # if a shot was found, either restart loop and skip this node (if validation failed) or return path
                 if shot_path is not None:
+                    events.on_analytic_shot(shot_path)
                     if not success:
                         continue
                     stats.analytic_successes += 1
@@ -549,6 +559,8 @@ class HybridAStarPlannerPython(HybridAStarPlannerBase):
                     g2 = cur.g + self._edge_cost(ds, direction, prev_dir, float(u), float(prev_u), float(rho_int))
                     # dominance check: only keep best g per discrete key
                     if not self._is_better_g(best_g, use_dense_best_g, nxt_key, g2, direction):
+                        if events is not None:
+                            events.on_pruned_trajectory([cur.pose, nxt_pose])
                         continue
                     h2 = self._heuristic(nxt_pose, goal, h2d)
                     n2 = HybridNode(key=nxt_key, pose=nxt_pose, parent_id=nid, g=g2, h=h2, f = g2 + h2, parent_action=(direction, u))
@@ -560,6 +572,8 @@ class HybridAStarPlannerPython(HybridAStarPlannerBase):
         # last-chance bounded connector from best frontier node (helps sparse/open maps)
         if self.cfg.use_analytic_connector and 0 <= best_h_nid < len(nodes):
             shot_path, success = self._attempt_analytic_connection(nodes[best_h_nid], goal, h2d, nodes, best_h_nid, verbose=True, events=events)
+            if shot_path is not None:
+                events.on_analytic_shot(shot_path)
             if shot_path and success:
                 events.emit_tick(
                     force=True,
@@ -583,7 +597,6 @@ class HybridAStarPlannerCpp(HybridAStarPlannerBase):
         self,
         occ_grid: OccupancyGrid,
         config: PlannerConfig,
-        *,
         use_rectangle_footprint: bool = True,
         use_voronoi_edge_cost: bool = True,
     ):
@@ -600,7 +613,6 @@ class HybridAStarPlannerCpp(HybridAStarPlannerBase):
         self,
         start: Pose,
         goal: GoalSpec,
-        *,
         max_expansions: int = 200_000,
         tick_callback: Optional[TickCallback] = None,
         tick_stride: int = 100,

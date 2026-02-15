@@ -288,6 +288,8 @@ class PlannerTick:
     trajectory: List[Pose]
     explored_poses: List[Pose]
     collision_poses: List[Pose]
+    pruned_trajectories: List[List[Pose]] = field(default_factory=list)
+    analytic_shot: List[Pose] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)

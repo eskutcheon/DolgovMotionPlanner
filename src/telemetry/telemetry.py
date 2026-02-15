@@ -66,6 +66,23 @@ def tick_to_markers(tick: PlannerTick) -> Dict[str, Any]:
                 "scale": {"x": 0.07, "y": 0.07},
                 "color": {"r": 1.0, "g": 0.2, "b": 0.2, "a": 0.95},
             },
+            {
+                "namespace": "planner/pruned_trajectories",
+                "type": "LINE_LIST",
+                "segments": [
+                    [_pose_to_marker_point(path[i]), _pose_to_marker_point(path[i + 1])]
+                    for path in tick.pruned_trajectories for i in range(max(0, len(path) - 1))
+                ],
+                "scale": {"x": 0.04},
+                "color": {"r": 0.35, "g": 0.55, "b": 1.0, "a": 0.55},
+            },
+            {
+                "namespace": "planner/analytic_shot",
+                "type": "LINE_STRIP",
+                "points": [_pose_to_marker_point(p) for p in tick.analytic_shot],
+                "scale": {"x": 0.08},
+                "color": {"r": 0.9, "g": 0.3, "b": 0.95, "a": 0.9},
+            },
         ],
     }
 

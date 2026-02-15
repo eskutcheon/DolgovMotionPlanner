@@ -35,33 +35,35 @@ python -m venv .env
 ```
 
 2. Activate the virtual environment:
+
     a. For Linux users:
     ```bash
-        source .env/bin/activate
+    source .env/bin/activate
     ```
     b. For Windows users:
     ```bash
-        .env/Scripts/activate
+    .env/Scripts/activate
     ```
 
 3. Finish environment setup and run initial tests with `pytest`:
+
     a. Python only:
     ```bash
-        python -m pip install -U pip
-        pip install -e .
-        pytest -v
+    python -m pip install -U pip
+    pip install -e .
+    pytest -v
     ```
     b. Optional C++ backend:
     ```bash
-        python -m pip install -U pip
-        pip install -e ".[cpp]"
-        $env:DOLGOV_BUILD_CPP="1" # on Linux: export DOLGOV_BUILD_CPP="1"
-        pip install -e . -v
-        pytest -m cpp
+    python -m pip install -U pip
+    pip install -e ".[cpp]"
+    $env:DOLGOV_BUILD_CPP="1" # on Linux: export DOLGOV_BUILD_CPP="1"
+    pip install -e . -v
+    pytest -m cpp
     ```
     c. Optional Visualization + MCAP/JSON export utilities
     ```bash
-        pip install -e ".[viz]"
+    pip install -e ".[viz]"
     ```
 
 
@@ -98,7 +100,7 @@ python scripts/npz_from_maze_images.py "path/to/image-directory" --output_dir "p
 
 ### Simulated Vehicle Parameters
 
-The simulated vehicle model in this project is a simple rectangular offset, most closely following the conventional kinematic "Bicycle" model. Physical dimensions of the vehicle are roughly the same as the modified 2006 Volkswagen Passat used by ![Dolgov et al. 2008](docs/Practical-Search-Techniques-in-Path-Planning_Dolgov.pdf)  in the 2007 DARPA Urban Challenge and examined in their subsequent papers.
+The simulated vehicle model in this project is a simple rectangular offset, most closely following the conventional kinematic "Bicycle" model. Physical dimensions of the vehicle are roughly the same as the modified 2006 Volkswagen Passat used by [Dolgov et al. 2008](docs/Practical-Search-Techniques-in-Path-Planning_Dolgov.pdf)  in the 2007 DARPA Urban Challenge and examined in their subsequent papers.
 
 The physical vehicle parameters are included as the global constants below. Refer to the diagram below for what they represent. Just as in the diagram, the vehicle pose is taken as the rear-axle center.
 ![](assets/vehicledimensions.png)

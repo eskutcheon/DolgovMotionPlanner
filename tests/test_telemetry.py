@@ -41,14 +41,17 @@ def test_tick_to_markers_includes_trajectory_and_collision_points(sample_tick: P
     from src.telemetry.telemetry import tick_to_markers
     payload = tick_to_markers(sample_tick)
     assert payload["tick"]["iteration"] == 10
-    assert len(payload["markers"]) == 5
+    assert len(payload["markers"]) == 7
     assert payload["markers"][2]["namespace"] == "planner/trajectory"
     assert len(payload["markers"][2]["points"]) == 2
     assert payload["markers"][4]["namespace"] == "planner/collisions"
     assert len(payload["markers"][4]["points"]) == 1
+    assert payload["markers"][5]["namespace"] == "planner/pruned_trajectories"
+    assert payload["markers"][6]["namespace"] == "planner/analytic_shot"
 
 
 def test_tick_write_mcap(tmp_path: Path, sample_tick: PlannerTick):
+    pytest.importorskip("mcap")
     from src.telemetry.telemetry import write_ticks_mcap
     pytest.importorskip("mcap")
     out = tmp_path / "ticks.mcap"
@@ -60,6 +63,7 @@ def test_tick_write_mcap(tmp_path: Path, sample_tick: PlannerTick):
 
 
 def test_tick_write_mcap_roundtrip_json(tmp_path: Path, sample_tick):
+    pytest.importorskip("mcap")
     from src.telemetry.telemetry import write_ticks_mcap
     # spoof some ticks with different iterations for testing
     ticks = [
@@ -84,6 +88,7 @@ def test_tick_write_mcap_roundtrip_json(tmp_path: Path, sample_tick):
 
 
 def test_tick_write_mcap_ns_time(tmp_path: Path, sample_tick):
+    pytest.importorskip("mcap")
     from src.telemetry.telemetry import write_ticks_mcap
     ticks = [
         replace(sample_tick, time_s=0.25),
@@ -172,12 +177,29 @@ def test_tick_planner_logs_and_writes_mcap(tmp_path, empty_grid, planner_config)
     raw_path = tmp_path / f"sim_raw_{uuid4().hex}.mcap"
     write_raw_mcap(ticks, raw_path)
     pytest.importorskip("foxglove")
-    from src.telemetry.foxglove import write_ticks_mcap_foxglove as write_fg_mcap
+    from src.telemetry.foxglove import write_ticks_mcap_foxglove
     fg_path = tmp_path / f"sim_fg_{uuid4().hex}.mcap"
-    write_fg_mcap(ticks, fg_path)
+    write_ticks_mcap_foxglove(ticks, fg_path)
     # check that both files are readable, i.e. have the magic header and at least one message
     for p in (raw_path, fg_path):
         with open(p, "rb") as f:
             reader = make_reader(f)
             n = sum(1 for _ in reader.iter_messages())
         assert n > 0
+
+
+def test_tick_scene_update_contains_pruned_and_analytic_entities(sample_tick):
+    pytest.importorskip("foxglove")
+    # from src.telemetry.foxglove import tick_to_scene_update, VizConfig
+    from src.telemetry.foxglove import tick_scene_entity_ids
+    # recreate the tick with pruned trajectories and analytic shot, then check that it entity IDs are present
+    tick = replace(
+        sample_tick,
+        pruned_trajectories=[[Pose(1.0, 2.0, 0.0, 0.0), Pose(1.5, 2.2, 0.1, 0.03)]],
+        analytic_shot=[Pose(1.5, 2.2, 0.1, 0.03), Pose(2.0, 2.5, 0.2, 0.02)],
+    )
+    # scene = tick_to_scene_update(tick, cfg=VizConfig())
+    # ids = {ent.id for ent in scene.entities}
+    ids = set(tick_scene_entity_ids(tick))
+    assert "planner/pruned_trajectories" in ids
+    assert "planner/analytic_shot" in ids
