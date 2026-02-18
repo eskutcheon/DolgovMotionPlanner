@@ -122,8 +122,8 @@ class ConnectorParams:
 @dataclass(frozen=True, slots=True)
 class AnalyticScheduleParams:
     every_n: int = 100
-    max_distance: float = 15.0 # only attempt analytic connection if within this (Euclidean)
-    use_adaptive_schedule: bool = True
+    max_distance: float = 10.0 # only attempt analytic connection if within this (Euclidean)
+    use_adaptive_schedule: bool = False
     min_interval: int = 20
     max_interval: int = 180
     distance_power: float = 1.5
@@ -288,6 +288,7 @@ class PlannerTick:
     trajectory: List[Pose]
     explored_poses: List[Pose]
     collision_poses: List[Pose]
+    explored_edges: List[Tuple[Pose, Pose]] = field(default_factory=list)
     pruned_trajectories: List[List[Pose]] = field(default_factory=list)
     analytic_shot: List[Pose] = field(default_factory=list)
 

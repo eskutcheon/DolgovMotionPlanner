@@ -4,7 +4,7 @@ import math
 import numpy as np
 
 if TYPE_CHECKING:
-    from src.models import OccupancyGrid, Pose
+    from src.models import OccupancyGrid
 
 
 
@@ -37,6 +37,15 @@ def kappa_to_bin(kappa: float, kappa_min: float, kappa_max: float, dkappa: float
     bin_idx = int(math.floor((k - kappa_min) / dkappa))
     return min(max(bin_idx, 0), kappa_bins - 1)
 
+
+def goal_reached(p: Tuple[float, float, float], goal: Tuple[float, float, float], pos_tol: float, theta_tol: float) -> bool:
+    """ Check if pose p is within the position and orientation tolerances of the goal pose. """
+    dx = p[0] - goal[0]
+    dy = p[1] - goal[1]
+    if dx * dx + dy * dy > pos_tol * pos_tol:
+        return False
+    dth = wrap_angle(p[2] - goal[2])
+    return abs(dth) <= theta_tol
 
 def generate_random_maze_grid(width: int, height: int, obstacle_prob: float = 0.1, seed: Optional[int] = None) -> np.ndarray:
     """ Generate a random occupancy grid where chosen cells and a few neighbors are marked as obstacles """

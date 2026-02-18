@@ -37,6 +37,8 @@ class PlannerEventStream:
         self.callback = callback
         self.stride = max(1, int(stride))
         self.explored_since_tick: List[Pose] = []
+        # TODO: might want to replace this with something simpler like the node ids
+        self.explored_edges_since_tick: List[Tuple[Pose, Pose]] = []
         self.collisions_since_tick: List[Pose] = []
         self.pruned_trajectories_since_tick: List[List[Pose]] = []
         self.latest_analytic_shot: List[Pose] = []
@@ -46,6 +48,9 @@ class PlannerEventStream:
         self.stats.goal_checks += 1
         self.stats.max_open_size = max(self.stats.max_open_size, int(open_size))
         self.explored_since_tick.append(pose)
+
+    def on_explored_edge(self, p0: Pose, p1: Pose) -> None:
+        self.explored_edges_since_tick.append((p0, p1))
 
     def on_push(self) -> None:
         self.stats.pushed += 1
@@ -64,7 +69,7 @@ class PlannerEventStream:
     def on_analytic_shot(self, path: Optional[List[Pose]]) -> None:
         self.latest_analytic_shot = list(path) if path else []
 
-    def emit_tick(self, force: bool, best_node: HybridNode, cur_pose: Pose, trajectory: List[Pose], open_size: int) -> None:
+    def emit_tick(self, force: bool, cur_node: HybridNode, cur_pose: Pose, trajectory: List[Pose], open_size: int) -> None:
         if any((
             self.callback is None,
             (not force and (self.stats.expanded % self.stride) != 0),
@@ -80,12 +85,13 @@ class PlannerEventStream:
                 open_size=int(open_size),
                 collision_checks=self.stats.collision_checks,
                 failed_rollouts=self.stats.failed_rollouts,
-                best_f=float(best_node.f),
-                best_g=float(best_node.g),
+                best_f=float(cur_node.f),
+                best_g=float(cur_node.g),
                 pose=cur_pose,
-                best_pose=best_node.pose,
+                best_pose=cur_node.pose,
                 trajectory=trajectory,
                 explored_poses=list(self.explored_since_tick),
+                explored_edges=list(self.explored_edges_since_tick),
                 collision_poses=list(self.collisions_since_tick),
                 pruned_trajectories=list(self.pruned_trajectories_since_tick),
                 analytic_shot=list(self.latest_analytic_shot),
@@ -93,6 +99,7 @@ class PlannerEventStream:
         )
         self.explored_since_tick.clear()
         self.collisions_since_tick.clear()
+        self.explored_edges_since_tick.clear()
         self.pruned_trajectories_since_tick.clear()
         # self.latest_analytic_shot.clear()
         self.stats.ticks_emitted += 1
@@ -515,10 +522,10 @@ class HybridAStarPlannerPython(HybridAStarPlannerBase):
                 best_h_nid = int(nid)
             best_node = nodes[best_h_nid] # aliasing for better readability in tick callback
             cur_traj = self._reconstruct(nodes, nid) # to reuse in tick callback without reconstructing multiple times per expansion
-            events.emit_tick(force=False, best_node=best_node, cur_pose=cur.pose, trajectory=cur_traj, open_size=len(open_heap))
+            events.emit_tick(force=False, cur_node=cur, cur_pose=cur.pose, trajectory=cur_traj, open_size=len(open_heap))
             # goal check for early exit
             if self._goal_reached(cur.pose, goal):
-                events.emit_tick(force=True, best_node=best_node, cur_pose=cur.pose, trajectory=cur_traj, open_size=len(open_heap))
+                events.emit_tick(force=True, cur_node=cur, cur_pose=cur.pose, trajectory=cur_traj, open_size=len(open_heap))
                 stats.end_time_s = time.perf_counter()
                 path: List[Pose] = self._smooth_path(cur_traj)
                 if path and not self._validate_path_exact(path, verbose=True):
@@ -537,7 +544,7 @@ class HybridAStarPlannerPython(HybridAStarPlannerBase):
                     if not success:
                         continue
                     stats.analytic_successes += 1
-                    events.emit_tick(force=True, best_node=best_node, cur_pose=cur.pose, trajectory=cur_traj, open_size=len(open_heap))
+                    events.emit_tick(force=True, cur_node=cur, cur_pose=cur.pose, trajectory=cur_traj, open_size=len(open_heap))
                     stats.end_time_s = time.perf_counter()
                     return shot_path, stats
             prev_dir, prev_u = cur.parent_action
@@ -565,6 +572,7 @@ class HybridAStarPlannerPython(HybridAStarPlannerBase):
                     h2 = self._heuristic(nxt_pose, goal, h2d)
                     n2 = HybridNode(key=nxt_key, pose=nxt_pose, parent_id=nid, g=g2, h=h2, f = g2 + h2, parent_action=(direction, u))
                     nodes.append(n2)
+                    events.on_explored_edge(cur.pose, nxt_pose)
                     self._update_best_g(best_g, use_dense_best_g, nxt_key, g2, direction)
                     tie = -n2.g if bool(self.cfg.prefer_larger_g_tiebreak) else 0.0
                     heapq.heappush(open_heap, (n2.f, tie, len(nodes) - 1))
@@ -577,7 +585,7 @@ class HybridAStarPlannerPython(HybridAStarPlannerBase):
             if shot_path and success:
                 events.emit_tick(
                     force=True,
-                    best_node=nodes[best_h_nid],
+                    cur_node=nodes[best_h_nid],
                     cur_pose=nodes[best_h_nid].pose,
                     trajectory=self._reconstruct(nodes, best_h_nid),
                     open_size=len(open_heap)

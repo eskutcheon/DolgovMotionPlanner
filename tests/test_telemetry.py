@@ -1,5 +1,6 @@
 import json
 from dataclasses import replace
+from tracemalloc import start
 from uuid import uuid4
 from pathlib import Path
 import pytest
@@ -7,6 +8,7 @@ import math
 from typing import List, Tuple, Any
 # local imports
 from src.structs import PlannerTick, Pose, GoalSpec
+from src.utils import goal_reached
 
 
 
@@ -203,3 +205,45 @@ def test_tick_scene_update_contains_pruned_and_analytic_entities(sample_tick):
     ids = set(tick_scene_entity_ids(tick))
     assert "planner/pruned_trajectories" in ids
     assert "planner/analytic_shot" in ids
+
+
+@pytest.mark.slow
+def test_tick_planner_logs_mazes_and_writes_mcap(tmp_path, maze_grid_and_poses, planner_config, start_pose: Pose, goal_spec: GoalSpec):
+    from src.planners import planner_factory
+    grid, start, goal = maze_grid_and_poses
+    # update start and goal poses with those from the maze file (necessary since Pose dataclasses are frozen)
+    s_pose = Pose(start[0], start[1], start_pose.theta, start_pose.kappa)
+    g_pose = Pose(goal[0], goal[1], goal_spec.pose.theta, goal_spec.pose.kappa)
+    # create new GoalSpec with updated goal pose
+    g_spec = GoalSpec(g_pose, goal_spec.pos_tol, goal_spec.theta_tol, goal_spec.kappa_tol)
+    planner = planner_factory(grid, planner_config, backend="python")
+    ticks = []
+
+    def on_tick(t):
+        ticks.append(t)
+
+    path, stats = planner.plan(
+        s_pose,
+        g_spec,
+        max_expansions=200_000,
+        tick_callback=on_tick,
+    )
+    # sanity check that we got some ticks with expected content
+    assert stats.expanded > 0
+    assert len(ticks) > 2
+    assert goal_reached(
+            path[-1].as_tuple(), g_spec.pose.as_tuple(), g_spec.pos_tol, g_spec.theta_tol
+        ), "Final pose does not reach the goal tolerances"
+    grid.view_grid(path)
+    pytest.importorskip("mcap")
+    from mcap.reader import make_reader
+    pytest.importorskip("foxglove")
+    from src.telemetry.foxglove import write_ticks_mcap_foxglove
+    fg_path = tmp_path / f"full_sim_fg_{uuid4().hex}.mcap"
+    write_ticks_mcap_foxglove(ticks, fg_path)
+    # check that both files are readable, i.e. have the magic header and at least one message
+    for p in (fg_path, fg_path):
+        with open(p, "rb") as f:
+            reader = make_reader(f)
+            n = sum(1 for _ in reader.iter_messages())
+        assert n > 0

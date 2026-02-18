@@ -2,6 +2,7 @@
 from typing import List, Optional, Tuple, Sequence, Dict
 import math
 import numpy as np
+np.set_printoptions(precision=3, suppress=True, threshold=100000)
 from pathlib import Path
 
 from src.structs import GridSpec, VehicleParams, Pose, DiscreteKey

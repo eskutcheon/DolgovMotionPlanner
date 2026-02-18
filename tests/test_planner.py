@@ -4,22 +4,13 @@ import math
 from typing import List, Tuple, Any
 from dataclasses import replace
 import numpy as np
-np.set_printoptions(precision=3, suppress=True, threshold=100000)
 import pytest
 # local module imports
 from src.structs import Pose, GoalSpec, GridSpec, PlannerConfig
 from src.models import OccupancyGrid
-from src.utils import pose_is_free
+from src.utils import pose_is_free, goal_reached
 from src.planners import planner_factory
 
-
-def _reached(p: Pose, goal: Pose, pos_tol: float, th_tol: float) -> bool:
-    dx = p.x - goal.x
-    dy = p.y - goal.y
-    if dx * dx + dy * dy > pos_tol * pos_tol:
-        return False
-    dth = (p.theta - goal.theta + math.pi) % (2 * math.pi) - math.pi
-    return abs(dth) <= th_tol
 
 @pytest.mark.slow
 def test_python_backend_finds_path_on_empty_map(empty_grid: OccupancyGrid, planner_config: PlannerConfig, start_pose: Pose, goal_spec: GoalSpec):
@@ -27,7 +18,9 @@ def test_python_backend_finds_path_on_empty_map(empty_grid: OccupancyGrid, plann
     path, stats = planner.plan(start_pose, goal_spec, max_expansions=50_000)
     assert stats.expanded > 0, "Planner did not expand any nodes"
     assert len(path) > 1, "Planner failed to find a path"
-    assert _reached(path[-1], goal_spec.pose, goal_spec.pos_tol, goal_spec.theta_tol), "Final pose does not reach the goal tolerances"
+    assert goal_reached(
+            path[-1].as_tuple(), goal_spec.pose.as_tuple(), goal_spec.pos_tol, goal_spec.theta_tol
+        ), "Final pose does not reach the goal tolerances"
     # basic collision-free check
     for p in path:
         assert pose_is_free(p, empty_grid, planner.footprint_offsets), "Path contains a pose in collision"
@@ -53,33 +46,30 @@ def test_python_backend_can_pass_through_gap(grid_with_wall: OccupancyGrid, plan
     goal = GoalSpec(Pose(50.0, 30.0, 0.0), pos_tol=2.0, theta_tol=math.radians(30.0))
     path, _ = planner.plan(start, goal, max_expansions=100_000)
     assert len(path) > 1, "Motion planner failed to find a path through the gap"
-    assert _reached(path[-1], goal.pose, goal.pos_tol, goal.theta_tol), "Final pose does not reach the goal tolerances"
+    assert goal_reached(
+            path[-1].as_tuple(), goal.pose.as_tuple(), goal.pos_tol, goal.theta_tol
+        ), "Final pose does not reach the goal tolerances"
     # basic collision-free check
     for p in path:
         assert pose_is_free(p, grid_with_wall, planner.footprint_offsets), "Path contains a pose in collision"
 
 
 @pytest.mark.slow
-def test_python_backend_handles_mazes(maze_grid_and_poses: Tuple[Any, List[float], List[float]], planner_config: PlannerConfig, start_pose: Pose, goal_spec: GoalSpec):
+def test_python_backend_handles_mazes(maze_grid_and_poses: Tuple[OccupancyGrid, List[float], List[float]], planner_config: PlannerConfig, start_pose: Pose, goal_spec: GoalSpec):
     grid, start, goal = maze_grid_and_poses
     # update start and goal poses with those from the maze file (necessary since Pose dataclasses are frozen)
-    # print("start pose values (world frame): ", start)
-    # print("start pose values (grid frame): ", grid.world_to_grid(start[0], start[1])[::-1])
     s_pose = Pose(start[0], start[1], start_pose.theta, start_pose.kappa)
-    # print("goal pose values (world frame): ", goal)
-    # print("goal pose values (grid frame): ", grid.world_to_grid(goal[0], goal[1])[::-1])
     g_pose = Pose(goal[0], goal[1], goal_spec.pose.theta, goal_spec.pose.kappa)
     # create new GoalSpec with updated goal pose
     g_spec = GoalSpec(g_pose, goal_spec.pos_tol, goal_spec.theta_tol, goal_spec.kappa_tol)
     planner = planner_factory(grid, planner_config, backend="python")
     path, stats = planner.plan(s_pose, g_spec, max_expansions=100_000)
-    #!!! FIXME: seemingly happens when it starts (but not really) in collision
     assert stats.expanded > 0, "Planner did not expand any nodes"
     assert len(path) > 1, "Planner failed to find a path"
-    assert _reached(path[-1], g_spec.pose, g_spec.pos_tol, g_spec.theta_tol), "Final pose does not reach the goal tolerances"
+    assert goal_reached(
+            path[-1].as_tuple(), g_spec.pose.as_tuple(), g_spec.pos_tol, g_spec.theta_tol
+        ), "Final pose does not reach the goal tolerances"
     # basic collision-free check
-    #!!! FIXME: we also occasionally get errors here where one part of the path contains obstacles for some reason
-        # added verbose flag to check the whole path when it fails
     grid.view_grid(path)
     for p in path:
         assert pose_is_free(p, grid, planner.footprint_offsets), "Path contains a pose in collision"
@@ -115,7 +105,9 @@ def test_analytic_connector_can_close_short_gap(empty_grid, planner_config):
     h2d = planner._build_goal_heuristics(goal)
     shot = planner._try_goal_shot(start, goal, h2d)
     assert shot is not None and len(shot) > 0
-    assert _reached(shot[-1], goal.pose, goal.pos_tol, goal.theta_tol)
+    assert goal_reached(
+            shot[-1].as_tuple(), goal.pose.as_tuple(), goal.pos_tol, goal.theta_tol
+        ), "Analytic shot does not reach the goal tolerances"
 
 
 def test_path_smoothing_preserves_collision_free(empty_grid, planner_config):
