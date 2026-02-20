@@ -56,9 +56,9 @@ def test_cpp_backend_planner_smoke(empty_grid, planner_config, start_pose, goal_
         pytest.skip("cpp_kernels import failed")
     if not CPP_AVAILABLE:
         pytest.skip("C++ backend not available")
-    from src.planners import HybridAStarPlannerCpp
+    from src.planners import planner_factory
 
-    planner_cpp = HybridAStarPlannerCpp(empty_grid, planner_config)
+    planner_cpp = planner_factory(empty_grid, planner_config, backend="cpp")
     path_cpp, stats_cpp = planner_cpp.plan(start_pose, goal_spec, max_expansions=50_000)
 
     assert stats_cpp.expanded > 0

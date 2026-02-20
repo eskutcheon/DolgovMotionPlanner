@@ -6,7 +6,7 @@ np.set_printoptions(precision=3, suppress=True, threshold=100000)
 from pathlib import Path
 
 from src.structs import GridSpec, VehicleParams, Pose, DiscreteKey
-from src.utils import TAU, wrap_angle, wrap_angle_2pi, pose_is_free, pose_is_free_cached_cells, kappa_to_bin
+from src.utils import TAU, wrap_angle, pose_is_free, pose_is_free_cached_cells, kappa_to_bin, theta_to_bin
 
 
 
@@ -168,7 +168,6 @@ class VoronoiField:
     def __init__(self, dO_m: np.ndarray, alpha: float, dO_max: float, dV_m: Optional[np.ndarray] = None):
         self.dO = dO_m.astype(np.float64, copy=False)
         self.dV = dV_m.astype(np.float64, copy=False) if dV_m is not None else None
-        # self.params = params
         self.alpha = float(alpha)
         self.dO_max = float(dO_max)
 
@@ -181,7 +180,7 @@ class VoronoiField:
         dO_max = float(self.dO_max)
         dO = self.dO
         dV = self.dV if self.dV is not None else dO
-        # Eq. (1)-style potential, clipped to [0,1]
+        # potential modeled after Eq. (1) in the 2008 paper - clipped to [0,1]
         a = np.clip(dO / dO_max, 0.0, 1.0)
         b = 1.0 - np.clip(dV / dO_max, 0.0, 1.0)
         rho = (a**alpha) * b
@@ -191,8 +190,6 @@ class VoronoiField:
 
 
 #? NOTE: both heuristic model classes have repeated use of some of the same discretization methods and may as well use a shared Indexer class
-
-
 class Indexer:
     """ Discretizes (x,y,theta,dir) and provides a flat index for best-g arrays """
     def __init__(self, grid: OccupancyGrid, *, kappa_bins: Optional[int] = None, kappa_max: Optional[float] = None):
@@ -206,15 +203,10 @@ class Indexer:
         self.kappa_min = -self.kappa_max        # placeholder; should be set from PlannerConfig
         self.dkappa = (self.kappa_max - self.kappa_min) / self.kappa_bins
 
-    def _theta_to_bin(self, theta: float) -> int:
-        """ Map heading to bin index """
-        t = wrap_angle_2pi(theta)
-        return int(math.floor(t / self.dtheta)) % self.theta_bins
-
     #? NOTE: DiscreteKey could be removed in favor of explicit tuples
     def pose_to_key(self, pose: Pose) -> DiscreteKey:
         ix, iy = self.grid.world_to_grid(pose.x, pose.y)
-        itheta = self._theta_to_bin(pose.theta)
+        itheta = theta_to_bin(pose.theta, self.theta_bins, self.dtheta)
         ikappa = kappa_to_bin(pose.kappa, self.kappa_min, self.kappa_max, self.dkappa, self.kappa_bins)
         return DiscreteKey(ix=ix, iy=iy, itheta=itheta, ikappa=ikappa) #direction=1 if direction >= 0 else -1)
 
@@ -259,7 +251,6 @@ class BicycleModel:
     def rollout(
         self,
         pose: Pose,
-        # steer: float,
         u: float,
         direction: int,
         ds: float,
@@ -276,10 +267,8 @@ class BicycleModel:
         rho: Optional[np.ndarray] = None,
     ) -> Optional[Tuple[Pose, float]]: # ) -> Optional[Pose]:
         r""" Propagate + collision-check along the edge; returns (endpoint, $\int \rho ds$) if collision-free else None. """
-        #& UPDATE: added curvature parameters to the function signature above, which now returns a tuple of (Pose, float) or None
         step = float(ds) / float(n_substeps)
         cur = pose
-        dtheta = TAU / float(theta_bins) if theta_bins > 0 else 0.0
         rho_int = 0.0
         for _ in range(int(n_substeps)):
             cur = self.propagate(cur, u, direction, step, kappa_max = kappa_max)
@@ -290,14 +279,14 @@ class BicycleModel:
             # TODO: would prefer to use memoization through functools rather than explicitly handling footprint_cache here
             # conservative distance-transform checkpoint: if reference point has enough clearance, accept immediately
             if (dO_m is None) or (gate_radius_m <= 0.0) or (float(dO_m[iy, ix]) < float(gate_radius_m)):
-                # Use cached footprint when not extremely tight; fall back to exact footprint near obstacles.
+                # Use cached footprint when not extremely tight; fall back to exact footprint near obstacles
                 if (
                     footprint_cache is not None
                     and theta_bins > 0
                     and dO_m is not None
                     and float(dO_m[iy, ix]) >= float(gate_radius_m) + float(exact_check_margin_m)
                 ):
-                    it = int(math.floor(wrap_angle_2pi(cur.theta) / dtheta)) % int(theta_bins)
+                    it = theta_to_bin(cur.theta, theta_bins)
                     if not pose_is_free_cached_cells(cur, grid, footprint_cache[it]):
                         return None
                 else:

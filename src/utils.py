@@ -31,6 +31,15 @@ def clamp(x: float, lo: float, hi: float) -> float:
     """ general utility for other float clamping """
     return lo if x < lo else hi if x > hi else x
 
+def theta_to_bin(theta: float, theta_bins: int, dtheta: Optional[float] = None) -> int:
+    """ Map angle to bin index """
+    if theta_bins <= 0:
+        raise ValueError("theta_bins must be > 0")
+    dtheta = dtheta or (TAU * float(theta_bins))
+    t = wrap_angle_2pi(theta)
+    return int(math.floor(t / dtheta)) % int(theta_bins)
+    # return min(max(bin_idx, 0), theta_bins - 1)
+
 def kappa_to_bin(kappa: float, kappa_min: float, kappa_max: float, dkappa: float, kappa_bins: int) -> int:
     """ Map curvature to bin index """
     k = max(kappa_min, min(kappa_max, kappa))

@@ -6,7 +6,7 @@ import numpy as np
 
 from .models import OccupancyGrid, BicycleModel
 from src.structs import Pose, PlannerConfig
-from src.utils import TAU, SQRT2, wrap_angle, wrap_angle_2pi, kappa_to_bin
+from src.utils import TAU, SQRT2, wrap_angle, wrap_angle_2pi, kappa_to_bin, theta_to_bin
 
 
 
@@ -160,8 +160,8 @@ class NonHolonomicWithoutObstaclesTable:
                     niy = int(round(nxt.y / res)) + nxy // 2
                     if not (0 <= nix < nxy and 0 <= niy < nxy):
                         continue
-                    # TODO: replace with some global theta_to_bin method later
-                    nit = int(math.floor(wrap_angle_2pi(nxt.theta) / dth)) % theta_bins
+                    # nit = int(math.floor(wrap_angle_2pi(nxt.theta) / dth)) % theta_bins
+                    nit = theta_to_bin(nxt.theta, theta_bins, dth)
                     nik = kappa_to_bin(nxt.kappa, -kappa_max, kappa_max, dkappa, kappa_bins)
                     # small reverse penalty in heuristic can be set to 0 for admissibility as in this case
                     nd = d + res
@@ -209,7 +209,8 @@ class NonHolonomicWithoutObstaclesTable:
         ix = int(round(xl / res)) + nxy // 2
         iy = int(round(yl / res)) + nxy // 2
         thl = wrap_angle(pose.theta - goal.theta)
-        it = int(math.floor(wrap_angle_2pi(thl) / dth)) % theta_bins
+        # it = int(math.floor(wrap_angle_2pi(thl) / dth)) % theta_bins
+        it = theta_to_bin(thl, theta_bins, dth)
         ik = kappa_to_bin(float(pose.kappa - goal.kappa), -kappa_max, kappa_max, dkappa, kappa_bins)
         val = float(self._table[iy, ix, it, ik])
         if not math.isfinite(val):
