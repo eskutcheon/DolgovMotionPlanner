@@ -279,3 +279,42 @@ def pose_is_free_cached_cells(p: 'Pose', grid: 'OccupancyGrid', cell_offsets: np
         if occ[iy, ix]:
             return False
     return True
+
+
+def get_occupied_rectangles(occ: np.ndarray) -> List[Tuple[int, int, int, int]]:
+    """ return merged occupied rectangles as (ix0, iy0, ix1, iy1) w/ right endpoints excluded """
+    rects: List[Tuple[int, int, int, int]] = []
+    rows, cols = occ.shape
+    # run_len[y, x] = number of consecutive True cells to the right, starting at (y, x)
+    run_len = np.zeros_like(occ, dtype=np.int32)
+    # compute run lengths by scanning right-to-left in a vectorized manner
+    run_len[:, -1] = occ[:, -1].astype(np.int32)
+    for x in range(cols - 2, -1, -1):
+        run_len[:, x] = np.where(occ[:, x], run_len[:, x + 1] + 1, 0)
+    # treat run_len as a histogram of widths for each row, finding maximal rectangles starting at each (y, x) with height >= 1
+    for y in range(rows):
+        # use a stack to compute maximal rectangles in this histogram
+        stack = []  # list of (x_start, width)
+        for x in range(cols + 1):
+            w = run_len[y, x] if x < cols else 0
+            start = x
+            while stack and stack[-1][1] > w:
+                x_start, w_prev = stack.pop()
+                # For each rectangle height=1 at row y then expand downward by looking at min widths in subsequent rows
+                max_h = _max_height_for_width(run_len, y, x_start, w_prev)
+                if max_h > 0:
+                    rects.append((x_start, y, x_start + w_prev, y + max_h))
+                start = x_start
+            if w > 0:
+                stack.append((start, w))
+    return rects
+
+def _max_height_for_width(run_len: np.ndarray, y: int, x: int, width: int) -> int:
+    # find max height from row y downward, where run_len[row, x] >= width
+    col = run_len[y:, x]
+    ok = col >= width # Boolean mask of rows where the run length supports this width
+    # return first row where it fails, indicating the height
+    if not ok[0]:
+        return 0
+    fail = np.argmax(~ok)
+    return fail if fail > 0 else len(ok)

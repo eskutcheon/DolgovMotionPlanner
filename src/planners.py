@@ -73,6 +73,7 @@ class PlannerEventStream:
         if any((
             self.callback is None,
             (not force and (self.stats.expanded % self.stride) != 0),
+            # might take this out as an unnecessary (for now) safeguard
             (force and not (self.explored_since_tick or self.collisions_since_tick))
         )):
             return

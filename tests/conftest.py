@@ -101,13 +101,13 @@ def maze_grid_and_poses(grid_spec, easy_maze_file: Path) -> Tuple[Any, List[floa
 @pytest.fixture
 def start_pose():
     from src.structs import Pose
-    return Pose(5.0, 5.0, 0.0)
+    return Pose(5.0, 5.0, float(np.pi/2))
 
 
 @pytest.fixture
 def goal_pose():
     from src.structs import Pose
-    return Pose(50.0, 50.0, np.deg2rad(90.0))
+    return Pose(50.0, 50.0, float(3*np.pi/2))
 
 
 @pytest.fixture

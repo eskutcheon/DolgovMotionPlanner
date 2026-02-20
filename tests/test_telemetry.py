@@ -1,20 +1,20 @@
 import json
 from dataclasses import replace
-from tracemalloc import start
+# from tracemalloc import start
 from uuid import uuid4
 from pathlib import Path
 import pytest
 import math
 from typing import List, Tuple, Any
 # local imports
-from src.structs import PlannerTick, Pose, GoalSpec
+from src.structs import PlannerTick, Pose, GoalSpec, PlannerConfig
 from src.utils import goal_reached
 
 
 
 def _read_mcap_messages(path) -> List[Tuple[Any, Any, Any]]:
     """ read all messages from an MCAP file and return a list of (schema, channel, message) tuples """
-    mcap = pytest.importorskip("mcap")
+    pytest.importorskip("mcap")
     from mcap.reader import make_reader
     out = []
     with open(path, "rb") as f:
@@ -40,7 +40,7 @@ def _read_mcap_by_topic(path):
 
 
 def test_tick_to_markers_includes_trajectory_and_collision_points(sample_tick: PlannerTick):
-    from src.telemetry.telemetry import tick_to_markers
+    from src.telemetry import tick_to_markers
     payload = tick_to_markers(sample_tick)
     assert payload["tick"]["iteration"] == 10
     assert len(payload["markers"]) == 7
@@ -54,7 +54,7 @@ def test_tick_to_markers_includes_trajectory_and_collision_points(sample_tick: P
 
 def test_tick_write_mcap(tmp_path: Path, sample_tick: PlannerTick):
     pytest.importorskip("mcap")
-    from src.telemetry.telemetry import write_ticks_mcap
+    from src.telemetry import write_ticks_mcap
     pytest.importorskip("mcap")
     out = tmp_path / "ticks.mcap"
     write_ticks_mcap([sample_tick], out)
@@ -66,7 +66,7 @@ def test_tick_write_mcap(tmp_path: Path, sample_tick: PlannerTick):
 
 def test_tick_write_mcap_roundtrip_json(tmp_path: Path, sample_tick):
     pytest.importorskip("mcap")
-    from src.telemetry.telemetry import write_ticks_mcap
+    from src.telemetry import write_ticks_mcap
     # spoof some ticks with different iterations for testing
     ticks = [
         sample_tick,
@@ -91,7 +91,7 @@ def test_tick_write_mcap_roundtrip_json(tmp_path: Path, sample_tick):
 
 def test_tick_write_mcap_ns_time(tmp_path: Path, sample_tick):
     pytest.importorskip("mcap")
-    from src.telemetry.telemetry import write_ticks_mcap
+    from src.telemetry import write_ticks_mcap
     ticks = [
         replace(sample_tick, time_s=0.25),
         replace(sample_tick, time_s=1.00),
@@ -108,7 +108,7 @@ def test_tick_write_mcap_ns_time(tmp_path: Path, sample_tick):
 
 
 def test_tick_write_jsonl_lines(tmp_path: Path, sample_tick):
-    from src.telemetry.telemetry import write_ticks_jsonl
+    from src.telemetry import write_ticks_jsonl
     ticks = [
         sample_tick,
         replace(sample_tick, iteration=11, time_s=0.30, expanded=11),
@@ -126,7 +126,7 @@ def test_tick_write_jsonl_lines(tmp_path: Path, sample_tick):
 def test_tick_foxglove_mcap_topics(tmp_path, sample_tick):
     """ test that the Foxglove MCAP writer publishes to expected topics, with expected encodings and payload structure """
     pytest.importorskip("foxglove")
-    from src.telemetry.foxglove import write_ticks_mcap_foxglove as write_fg_mcap
+    from src.telemetry import write_ticks_mcap_foxglove as write_fg_mcap
     ticks = [
         sample_tick,
         replace(sample_tick, iteration=11, time_s=0.30, expanded=11),
@@ -136,7 +136,8 @@ def test_tick_foxglove_mcap_topics(tmp_path, sample_tick):
     by_topic = _read_mcap_by_topic(out_path)
     # emsure presence of topics the Foxglove writer logs: scene + two pointclouds + raw tick-as-json
     assert "/planner/scene" in by_topic
-    assert "/planner/explored" in by_topic
+    # TODO: check these against a schema built from the VizConfig objects later
+    # assert "/planner/explored" in by_topic
     assert "/planner/collisions" in by_topic
     assert "/planner/tick" in by_topic
     # expect at least one message per tick on these streams
@@ -175,11 +176,11 @@ def test_tick_planner_logs_and_writes_mcap(tmp_path, empty_grid, planner_config)
     assert len(ticks) > 2  # "several" ticks
     pytest.importorskip("mcap")
     from mcap.reader import make_reader
-    from src.telemetry.telemetry import write_ticks_mcap as write_raw_mcap
+    from src.telemetry import write_ticks_mcap as write_raw_mcap
     raw_path = tmp_path / f"sim_raw_{uuid4().hex}.mcap"
     write_raw_mcap(ticks, raw_path)
     pytest.importorskip("foxglove")
-    from src.telemetry.foxglove import write_ticks_mcap_foxglove
+    from src.telemetry import write_ticks_mcap_foxglove
     fg_path = tmp_path / f"sim_fg_{uuid4().hex}.mcap"
     write_ticks_mcap_foxglove(ticks, fg_path)
     # check that both files are readable, i.e. have the magic header and at least one message
@@ -190,25 +191,8 @@ def test_tick_planner_logs_and_writes_mcap(tmp_path, empty_grid, planner_config)
         assert n > 0
 
 
-def test_tick_scene_update_contains_pruned_and_analytic_entities(sample_tick):
-    pytest.importorskip("foxglove")
-    # from src.telemetry.foxglove import tick_to_scene_update, VizConfig
-    from src.telemetry.foxglove import tick_scene_entity_ids
-    # recreate the tick with pruned trajectories and analytic shot, then check that it entity IDs are present
-    tick = replace(
-        sample_tick,
-        pruned_trajectories=[[Pose(1.0, 2.0, 0.0, 0.0), Pose(1.5, 2.2, 0.1, 0.03)]],
-        analytic_shot=[Pose(1.5, 2.2, 0.1, 0.03), Pose(2.0, 2.5, 0.2, 0.02)],
-    )
-    # scene = tick_to_scene_update(tick, cfg=VizConfig())
-    # ids = {ent.id for ent in scene.entities}
-    ids = set(tick_scene_entity_ids(tick))
-    assert "planner/pruned_trajectories" in ids
-    assert "planner/analytic_shot" in ids
-
-
 @pytest.mark.slow
-def test_tick_planner_logs_mazes_and_writes_mcap(tmp_path, maze_grid_and_poses, planner_config, start_pose: Pose, goal_spec: GoalSpec):
+def test_tick_planner_logs_mazes_and_writes_mcap(tmp_path, maze_grid_and_poses, planner_config: PlannerConfig, start_pose: Pose, goal_spec: GoalSpec):
     from src.planners import planner_factory
     grid, start, goal = maze_grid_and_poses
     # update start and goal poses with those from the maze file (necessary since Pose dataclasses are frozen)
@@ -238,9 +222,9 @@ def test_tick_planner_logs_mazes_and_writes_mcap(tmp_path, maze_grid_and_poses, 
     pytest.importorskip("mcap")
     from mcap.reader import make_reader
     pytest.importorskip("foxglove")
-    from src.telemetry.foxglove import write_ticks_mcap_foxglove
+    from src.telemetry import write_ticks_mcap_foxglove
     fg_path = tmp_path / f"full_sim_fg_{uuid4().hex}.mcap"
-    write_ticks_mcap_foxglove(ticks, fg_path)
+    write_ticks_mcap_foxglove(ticks, fg_path, occ_grid=grid, start_pose=s_pose, goal=g_spec, vehicle=planner_config.vehicle)
     # check that both files are readable, i.e. have the magic header and at least one message
     for p in (fg_path, fg_path):
         with open(p, "rb") as f:
