@@ -7,7 +7,6 @@ if TYPE_CHECKING:
     from src.models import OccupancyGrid
 
 
-
 TAU = 2.0 * math.pi
 SQRT2 = math.sqrt(2.0)
 
@@ -35,7 +34,7 @@ def theta_to_bin(theta: float, theta_bins: int, dtheta: Optional[float] = None) 
     """ Map angle to bin index """
     if theta_bins <= 0:
         raise ValueError("theta_bins must be > 0")
-    dtheta = dtheta or (TAU * float(theta_bins))
+    dtheta = dtheta or (TAU / float(theta_bins)) # default bin width = 2*pi / theta_bins
     t = wrap_angle_2pi(theta)
     return int(math.floor(t / dtheta)) % int(theta_bins)
     # return min(max(bin_idx, 0), theta_bins - 1)
@@ -87,12 +86,14 @@ def generate_random_maze_grid(width: int, height: int, obstacle_prob: float = 0.
     return occ
 
 
+# --------------------------------------------------------
+# Distance fields: $dO(x,y)$ and $dV(x,y)$
+# --------------------------------------------------------
 
 def compute_distance_to_obstacles_m(occ: np.ndarray, resolution: float) -> np.ndarray:
     """ dO(x,y): Euclidean distance to nearest obstacle in meters.
         fast path uses SciPy if available; fallback uses an approximate chamfer distance
     """
-
     try:
         from scipy.ndimage import distance_transform_edt  # type: ignore
         free = ~occ
@@ -129,37 +130,87 @@ def compute_distance_to_obstacles_m(occ: np.ndarray, resolution: float) -> np.nd
         min_pass(range(w - 1, -1, -1), range(h - 1, -1, -1), bwd_neighbors)
         return dist
 
+def _compute_gvd_distance_scipy(occ: np.ndarray, resolution: float) -> np.ndarray:
+    r""" (Scipy version) approximate distance-to-GVD by extracting a ridge mask from dO and running a distance transform to that ridge """
+    from scipy.ndimage import distance_transform_edt  # type: ignore
+    occ = occ.astype(bool, copy=False)
+    free = ~occ
+    # indices of shape (2, H, W) giving nearest obstacle cell for each free cell
+    _, indices = distance_transform_edt(free, return_indices=True) # only need nearest-obstacle indices - distances aren't used directly
+    H, W = occ.shape
+    nearest_idx = indices[0] * W + indices[1]  # flatten to 1D index for each cell
+    ridge = np.zeros((H, W), dtype=bool)
+    nbr_offsets = (-1,0,1)
+    # mark ridge cells where the nearest obstacle changes between 8 neighboring free cells to approximate the GVD boundary
+    for dy in nbr_offsets:
+        for dx in nbr_offsets:
+            if dx == 0 and dy == 0: # exclude center cell
+                continue
+            shifted_idx = np.roll(nearest_idx, shift=(dy, dx), axis=(0, 1))
+            ridge |= (shifted_idx != nearest_idx) & free
+    # remove wrap-around artifacts by clearing the borders of the ridge mask
+    for i in (0, -1):
+        ridge[i, :] = False
+        ridge[:, i] = False
+    dist_to_ridge = distance_transform_edt(~ridge).astype(np.float64) * resolution
+    return dist_to_ridge
 
-def compute_gvd_distance_m(dO_m: np.ndarray, resolution: float) -> np.ndarray:
-    """ approximate distance-to-GVD by extracting a ridge mask from dO and running a distance transform to that ridge """
+def _compute_gvd_distance_from_dO(dO_m: np.ndarray, resolution: float) -> np.ndarray:
+    # fallback: extract ridge from dO and compute distance to that ridge
     dO = dO_m.astype(np.float64, copy=False)
-    h, w = dO.shape
-    ridge = np.zeros((h, w), dtype=bool)
-    # skip map border for simplicity (I think borders are poor GVD indicators anyway)
-    for iy in range(1, h - 1):
-        for ix in range(1, w - 1):
+    H, W = dO.shape
+    ridge = np.zeros((H, W), dtype=bool)
+    # skip map border for simplicity (borders are poor GVD indicators anyway)
+    for iy in range(1, H - 1):
+        for ix in range(1, W - 1):
             c = float(dO[iy, ix])
             if c <= 0.0:
                 continue
             nbrs = dO[(iy - 1):(iy + 2), (ix - 1):(ix + 2)] #.ravel() # includes center cell, but that doesn't affect the max
             # strict local maxima or broad plateau maxima (within tiny epsilon)
             mx = float(np.max(nbrs))
-            if c >= mx - 1e-9:
+            if c >= mx - 1e-9: # if current cell is roughly a local maximum in dO, mark as ridge cell
                 # require at least two near-max neighbors to avoid isolated spikes
                 if int(np.sum(nbrs >= (mx - 1e-6))) >= 3:
                     ridge[iy, ix] = True
-    # fallback for sparse/no-obstacle maps: avoid all-zero ridge by seeding the map centerline
+    # fallback for sparse/no-obstacle maps - avoids all-zero ridge by seeding the map centerline
     if not np.any(ridge):
-        ridge[h // 2, :] = True
-        ridge[:, w // 2] = True
+        ridge[H // 2, :] = True
+        ridge[:, W // 2] = True
     # distance transform to nearest ridge cell
-    return compute_distance_to_obstacles_m(ridge, float(resolution))
+    return compute_distance_to_obstacles_m(ridge, resolution)
+
+def compute_gvd_distance_m(dO_or_occ: np.ndarray, resolution: float) -> np.ndarray:
+    r"""
+        $dV(x,y)$: distance (meters) to the generalized Voronoi diagram (GVD) in a grid map
+        Accepts either:
+            - occ  : boolean occupancy grid (True = obstacle)
+            - dO_m : distance-to-obstacles field in meters (0 on obstacles)
+        NOTES:
+        - a practical GVD proxy is the set of free cells separating distinct nearest-obstacle regions, approximated by
+            1. computing the nearest obstacle cell for every free cell (via EDT return_indices),
+            2. marking free cells whose neighbors have a different nearest-obstacle identity as GVD boundary,
+            3. running an EDT to that boundary to get $dV(x,y)$ in meters
+        - if SciPy is unavailable, we fall back to the older ridge-on-dO heuristic (less accurate in tight mazes)
+    """
+    arr = np.asarray(dO_or_occ)
+    # Occupancy case: prefer the more faithful SciPy-based boundary extraction when possible.
+    if arr.dtype in (bool, np.bool, np.bool_):
+        occ = arr.astype(bool, copy=False)
+        try:
+            return _compute_gvd_distance_scipy(occ, resolution)
+        except Exception:
+            # fallback: extract ridge from dO and compute distance to that ridge
+            dO = compute_distance_to_obstacles_m(occ, resolution).astype(np.float64, copy=False)
+            return _compute_gvd_distance_from_dO(dO, resolution)
+    # Distance-field case (this is what planner_base currently passes in).
+    dO = arr.astype(np.float64, copy=False)
+    return _compute_gvd_distance_from_dO(dO, resolution)
 
 
-
-# ----------------------------
+# --------------------------------------------------------
 # Collision: rectangle footprint sampled in vehicle frame
-# ----------------------------
+# --------------------------------------------------------
 
 def make_rectangle_footprint_offsets(wheelbase: float, width: float, front_overhang: float, rear_overhang: float, sample_step: float) -> np.ndarray:
     """ Return an (N,2) array of (dx,dy) offsets in the vehicle frame.
@@ -169,8 +220,7 @@ def make_rectangle_footprint_offsets(wheelbase: float, width: float, front_overh
             - rectangle spans:
                 x in [-rear_overhang, wheelbase + front_overhang]
                 y in [-width/2, +width/2]
-
-        We sample the *interior* of the rectangle on a regular lattice. This is simple and robust on occupancy grids.
+        We sample the *interior* points of the rectangle on a regular lattice - should be simple and robust on occupancy grids
     """
     step = float(sample_step)
     if step <= 0.0:
@@ -189,14 +239,13 @@ def make_rectangle_footprint_offsets(wheelbase: float, width: float, front_overh
 
 
 def rectangle_circumscribed_radius(wheelbase, width, front_overhang, rear_overhang) -> float:
-    """ Conservative radius (meters) of the rectangular footprint around the rear-axle origin """
-    # TODO: probably need to reformulate this whole function to give a more conservative radius
+    """ Conservative radius (meters) of the smallest circle centered at the rear axle origin, fully containing the footprint rectangle"""
+    #? NOTE: does a purely geometric "worst‑case radius of the footprint" around the rear‑axle origin, independent of steering angle or kinematic constraints
+    #   conservative but ignores how the body actually swings during a turn, so it can be both over‑conservative and still miss some off‑tracking behaviors
     x_front = float(wheelbase + front_overhang)
-    x_rear = float(rear_overhang)
     y = 0.5 * float(width)
-    # return math.hypot(rear_overhang + wheelbase, y)
-    #! pretty sure the hypotenuse of x_front and y will always be largest
-    return max(math.hypot(x_front, y), math.hypot(x_rear, y))
+    return math.hypot(x_front, y)
+
 
 
 def pose_is_free(p: 'Pose', grid: 'OccupancyGrid', footprint_offsets: Optional[np.ndarray]) -> bool:
@@ -206,11 +255,6 @@ def pose_is_free(p: 'Pose', grid: 'OccupancyGrid', footprint_offsets: Optional[n
     """
     #! FIXME: doesn't currently include the goal tolerance as a free region around the goal pose
         # need to consider that primarily for _validate_exact_path in the planners (which checks whether the path is collision-free all the way to the goal pose)
-        #!!! PROBLEM TO INVESTIGATE: I think we're getting that the goal pose is in collision more often because the theta and kappa tolerances may prevent us from small,
-        # last minute adjustments to the final pose that would otherwise allow it to be collision-free. This is especially true for the nonholonomic table test cases where the
-        # goal pose is often right up against a wall, and the planner needs to make a final small adjustment to the final pose to meet the tolerances. If that final small adjustment
-        # is prevented by the theta and kappa tolerances, then we may end up with a final pose that is in collision more often than if we had no tolerances and could make that final
-        # small adjustment to get out of collision.
     ox, oy = grid.grid.origin_xy
     res = float(grid.grid.resolution)
     # fast path: reference point only
@@ -240,7 +284,6 @@ def build_orientation_binned_footprint_cache(
     footprint_offsets_m: np.ndarray,
     resolution_m: float,
     theta_bins: int,
-    *,
     dilate_cells: int = 1,
 ) -> List[np.ndarray]:
     """ Precompute conservative integer grid-cell offsets for each theta bin.

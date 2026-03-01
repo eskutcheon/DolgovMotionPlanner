@@ -33,14 +33,18 @@ def test_holonomic_heuristic_on_empty_grid_has_reasonable_values():
 
 
 def test_nonholonomic_table_zero_at_goal_and_euclidean_far():
-    cfg = PlannerConfig(
-        grid=GridSpec(resolution=1.0, theta_bins=36, kappa_bins=11),
-        vehicle=VehicleParams(),
-        # steering_samples=5,
-        kappa_rate_samples=5,
+    from src.structs import HeuristicParams
+    heuristics = HeuristicParams(
+        # keep the nonholonomic table smaller for tests
         nh_table_xy_radius=6.0,
         nh_table_xy_res=1.0,
         nh_table_theta_res=math.radians(15.0),
+    )
+    cfg = PlannerConfig(
+        grid=GridSpec(resolution=1.0, theta_bins=36, kappa_bins=11),
+        vehicle=VehicleParams(),
+        kappa_rate_samples=5,
+        heuristics=heuristics,
     )
     nh = NonHolonomicWithoutObstaclesTable(cfg)
     nh.build_offline()
@@ -62,17 +66,33 @@ def test_compute_gvd_distance_returns_finite_field():
     assert np.all(np.isfinite(dV))
     assert float(np.max(dV)) > 0.0
 
+def test_compute_gvd_distance_from_occ():
+    occ = np.zeros((30, 30), dtype=bool)
+    occ[10:20, 15] = True
+    grid = GridSpec(resolution=1.0, theta_bins=36, kappa_bins=11)
+    og = OccupancyGrid(occ, grid)
+    # using dO just to compare the results
+    dV = compute_gvd_distance_m(og.occ, resolution=1.0)
+    assert dV.shape == occ.shape
+    assert np.all(np.isfinite(dV))
+    assert float(np.max(dV)) > 0.0
+
 #& UPDATE: test to check that nonholonomic table respects the kappa bins override (important for preventing memory blow-up for high-res grids)
 def test_nonholonomic_table_respects_nh_kappa_bins_override():
-    cfg = PlannerConfig(
-        grid=GridSpec(resolution=1.0, theta_bins=36, kappa_bins=11),
-        vehicle=VehicleParams(),
+    from src.structs import HeuristicParams
+    heuristics = HeuristicParams(
         nh_kappa_bins=5,
         nh_table_xy_radius=4.0,
         nh_table_xy_res=1.0,
         nh_table_theta_res=math.radians(20.0),
     )
+    cfg = PlannerConfig(
+        grid=GridSpec(resolution=1.0, theta_bins=36, kappa_bins=11),
+        vehicle=VehicleParams(),
+        heuristics=heuristics,
+    )
     nh = NonHolonomicWithoutObstaclesTable(cfg)
     nh.build_offline()
     assert nh._meta is not None
-    assert int(nh._meta[5]) == 5
+    INDEX_KAPPA_BINS = 6
+    assert int(nh._meta[INDEX_KAPPA_BINS]) == 5

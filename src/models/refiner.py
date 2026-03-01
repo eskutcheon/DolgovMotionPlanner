@@ -2,19 +2,17 @@
 
 # Nonlinear optimization-based path smoothing (high-level flow)
 # -------------------------------------------------------------------------------------------------
-# Goal: improve a piecewise-linear / discrete planner path by moving interior (x,y) vertices to reduce an objective
-#   while keeping endpoints fixed and staying collision-free.
-#
-# PathRefiner: path post-processing via:
-#   1) lightweight local relaxation smoothing, then (optionally)
-#   2) nonlinear objective-based refinement with collision-aware anchoring.
+# Goal: improve a piecewise-linear / discrete planner path by moving interior (x,y) vertices to
+#   minimize an objective while keeping endpoints fixed and staying collision-free
+# Post-processing steps:
+#   1. lightweight local relaxation smoothing
+#   2. [OPTIONAL] nonlinear objective-based refinement with collision-aware anchoring
 # -------------------------------------------------------------------------------------------------
 
 from typing import List, Optional, Tuple
 import math
 import numpy as np
 from scipy.optimize import minimize
-
 # local module imports
 from .models import OccupancyGrid
 from src.structs import Pose, PathSmootherParams
@@ -24,7 +22,7 @@ from src.utils import TAU, SQRT2, wrap_angle, pose_is_free
 class PathRefiner:
     """ Path post-processor for lightweight smoothing and objective-based anchored refinement """
 
-    def __init__(self, occ_map: OccupancyGrid, cfg: PathSmootherParams, dO_m: np.ndarray, kappa_max: float, *,
+    def __init__(self, occ_map: OccupancyGrid, cfg: PathSmootherParams, dO_m: np.ndarray, kappa_max: float,
                  footprint_offsets: Optional[np.ndarray], rho: Optional[np.ndarray] = None):
         """
             Args:
@@ -41,6 +39,7 @@ class PathRefiner:
         self.dO = dO_m
         self.rho = rho
         self.footprint_offsets = footprint_offsets
+        self.alpha = cfg.smoothing_alpha
         # precompute grid-field gradients once to make optimization evaluations cheap and avoid repeated finite differences in the objective loop
         res = float(self.map.grid.resolution)
         self._dO_dy, self._dO_dx = np.gradient(self.dO, res)
@@ -98,6 +97,43 @@ class PathRefiner:
         val, _ = self._objective_value_and_grad(xy)
         return val
 
+    def _penalize_curvature_change(self, grad: np.ndarray, xy: np.ndarray) -> float:
+        r""" curvature-continuity proxy: penalize changes in curvature (3rd finite difference)
+            - proxy for curvature continuity that's cheaper to compute than exact curvature derivatives, since it only depends on vertex positions, not headings
+            - computed as the sum of squared third-order differences: $\sum_i |p_{i-2} - 3p_{i-1} + 3p_i - p_{i+1}|^2$
+            - gradient is added to the overall objective gradient to encourage smoother curvature profiles
+        """
+        w_cr = float(self.cfg.objective_w_curvature_rate)
+        if w_cr <= 0.0 or len(xy) < 4:
+            return 0.0
+        # Compute third order differences: $p_{i-2} - 3p_{i-1} + 3p_i - p_{i+1}$
+        dd3 = xy[:-3] - 3.0 * xy[1:-2] + 3.0 * xy[2:-1] - xy[3:]
+        val = float(np.sum(dd3 * dd3))
+        # Gradient for $|dd3|^2$ accumulates into the 4 points participating in each 3rd-diff stencil.
+        grad[:-3] += 2.0 * w_cr * dd3
+        grad[1:-2] -= 6.0 * w_cr * dd3
+        grad[2:-1] += 6.0 * w_cr * dd3
+        grad[3:] -= 2.0 * w_cr * dd3
+        return val
+
+    def _enforce_smoothness(self, grad: np.ndarray, xy: np.ndarray) -> float:
+        r""" smoothness proxy: penalize second finite difference (discrete curvature) to suppress geometric wiggles
+            - computed as the sum of squared second-order differences: $\sum_i |p_{i-1} - 2p_i + p_{i+1}|^2$
+            - gradient is added to the overall objective gradient to encourage smoother paths
+        """
+        w_sm = float(self.cfg.objective_w_smooth)
+        if w_sm <= 0.0 or len(xy) < 3:
+            return 0.0
+        # compute second order differences: $\Delta^{2} p_{i}  =  p_{i-1} - 2p_i + p_{i+1}$
+        dd = xy[:-2] - 2.0 * xy[1:-1] + xy[2:]
+        val = w_sm * float(np.sum(dd * dd)) #! might not need this multiplier
+        # Gradient for $|dd|^2$ accumulates into the 3 points contributing to each diff stencil
+        grad[:-2] += 2.0 * w_sm * dd
+        grad[1:-1] -= 4.0 * w_sm * dd
+        grad[2:] += 2.0 * w_sm * dd
+        return val
+
+
     def _objective_value_and_grad(self, xy: np.ndarray) -> Tuple[float, np.ndarray]:
         r""" Objective and analytic gradient for nonlinear-optimized path refinement
             Args:
@@ -122,15 +158,11 @@ class PathRefiner:
         unit = seg / seg_len[:, None]
         grad[:-1] -= wl * unit
         grad[1:] += wl * unit
-        # smoothness + curvature proxy (both on second differences for speed) - both weights combined for speed
-        dd = xy[:-2] - 2.0 * xy[1:-1] + xy[2:]  # $\Delta^{2} p_{i} = p_{i-1} - 2p_{i} + p_{i+1}$
-        w_sm = float(self.cfg.objective_w_smooth)
-        w_k = float(self.cfg.objective_w_curvature)
-        w2 = w_sm + w_k
-        val += w2 * float(np.sum(dd * dd))
-        grad[:-2] += 2.0 * w2 * dd
-        grad[1:-1] -= 4.0 * w2 * dd
-        grad[2:] += 2.0 * w2 * dd
+        #& UPDATE - removed combined weighting of smoothness and curvature so that now smoothness is enforced with the 2nd diff and curvature change is enforced with the 3rd diff
+        # smoothness term w/ 2nd order differences - suppress geometric oscillations
+        val += self._enforce_smoothness(grad, xy)
+        # curvature continuity proxy (3rd differences) - cheaper than exact curvature derivatives, encourages smoother curvature profiles
+        val += self._penalize_curvature_change(grad, xy) #? NOTE: does slow down the planner a fair bit apparently
         # obstacle and Voronoi terms (sampled on grid with precomputed gradients) - turns spatial penalties into cheap pointwise lookups plus vector adds
         if len(xy) > 2:
             xi = np.floor((xy[1:-1, 0] - float(self.map.grid.origin_xy[0])) / float(self.map.grid.resolution)).astype(np.int64)
@@ -166,6 +198,7 @@ class PathRefiner:
         return float(val), grad
 
     # def _optimize_xy(self, xy_init: np.ndarray, anchors: np.ndarray) -> np.ndarray:
+    #     """ Run a simple finite-difference gradient descent on the free (non-anchored) vertices """
     #     xy = np.array(xy_init, dtype=np.float64, copy=True)
     #     eps = max(1e-3, float(self.cfg.objective_smoothing_fd_eps))
     #     lr0 = max(1e-4, float(self.cfg.objective_smoothing_lr))
@@ -286,8 +319,7 @@ class PathRefiner:
 
     def smooth_path(self, path: List[Pose]) -> List[Pose]:
         """ called by planners - run lightweight interpolation smoothing then optional objective refinement """
-        out = list(path)
-        alpha = 0.15
+        out = list(path) # make a copy to modify in place
         # cheap local relaxation (windowed averaging) with collision acceptance
         passes = max(1, int(self.cfg.smoothing_passes))
         w = max(2, int(self.cfg.smoothing_window))
@@ -298,15 +330,15 @@ class PathRefiner:
                 hi = min(len(out) - 1, i + w)
                 p_prev, p_next = out[lo], out[hi]
                 # blend current state toward its neighborhood average (small step for stability).
-                cx = (1.0 - alpha) * out[i].x + alpha * 0.5 * (p_prev.x + p_next.x)
-                cy = (1.0 - alpha) * out[i].y + alpha * 0.5 * (p_prev.y + p_next.y)
+                cx = (1.0 - self.alpha) * out[i].x + self.alpha * 0.5 * (p_prev.x + p_next.x)
+                cy = (1.0 - self.alpha) * out[i].y + self.alpha * 0.5 * (p_prev.y + p_next.y)
                 # smooth heading via sin/cos averaging to handle wrap-around
-                sth = np.sin(out[i].theta) + alpha * (np.sin(p_prev.theta) + np.sin(p_next.theta))
-                cth = np.cos(out[i].theta) + alpha * (np.cos(p_prev.theta) + np.cos(p_next.theta))
+                sth = np.sin(out[i].theta) + self.alpha * (np.sin(p_prev.theta) + np.sin(p_next.theta))
+                cth = np.cos(out[i].theta) + self.alpha * (np.cos(p_prev.theta) + np.cos(p_next.theta))
                 th = float(np.arctan2(sth, cth))
                 # smooth and clamp curvature via direct averaging
                 #? NOTE: could also do this via finite differences on the smoothed geometry after optimization for more exact curvature smoothing
-                kappa = float((1.0 - alpha) * out[i].kappa + alpha * 0.5 * (p_prev.kappa + p_next.kappa))
+                kappa = float((1.0 - self.alpha) * out[i].kappa + self.alpha * 0.5 * (p_prev.kappa + p_next.kappa))
                 kappa = max(-float(self.kappa_max), min(float(self.kappa_max), kappa))
                 candidate = Pose(x=float(cx), y=float(cy), theta=th, kappa=kappa)
                 if pose_is_free(candidate, self.map, self.footprint_offsets):

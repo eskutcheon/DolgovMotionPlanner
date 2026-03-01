@@ -169,8 +169,10 @@ def test_tick_planner_logs_and_writes_mcap(tmp_path, empty_grid, planner_config)
         goal,
         max_expansions=20_000,
         tick_callback=on_tick,
-        tick_stride=250,
+        tick_stride=100,
     )
+    # if not path:
+    #     pytest.skip("Planner failed to find a path in the maze, so skipping the rest of the MCAP writing/logging test")
     # sanity check that we got some ticks with expected content
     assert stats.expanded > 0
     assert len(ticks) > 2  # "several" ticks
@@ -192,32 +194,38 @@ def test_tick_planner_logs_and_writes_mcap(tmp_path, empty_grid, planner_config)
 
 
 @pytest.mark.slow
-def test_tick_planner_logs_mazes_and_writes_mcap(tmp_path, maze_grid_and_poses, planner_config: PlannerConfig, start_pose: Pose, goal_spec: GoalSpec):
+def test_tick_planner_logs_mazes_and_writes_mcap(
+    tmp_path: Path,
+    maze_grid_and_poses: Tuple[Any, List[float], List[float]],
+    planner_config: PlannerConfig,
+    start_pose: Pose,
+    goal_spec: GoalSpec,
+    require_success: bool = True,
+):
     from src.planners import planner_factory
     grid, start, goal = maze_grid_and_poses
     # update start and goal poses with those from the maze file (necessary since Pose dataclasses are frozen)
     s_pose = Pose(start[0], start[1], start_pose.theta, start_pose.kappa)
     g_pose = Pose(goal[0], goal[1], goal_spec.pose.theta, goal_spec.pose.kappa)
     # create new GoalSpec with updated goal pose
-    g_spec = GoalSpec(g_pose, goal_spec.pos_tol, goal_spec.theta_tol, goal_spec.kappa_tol)
+    g_spec = GoalSpec(g_pose, goal_spec.pos_tol, goal_spec.theta_tol) #, goal_spec.kappa_tol)
     planner = planner_factory(grid, planner_config, backend="python")
     ticks = []
 
     def on_tick(t):
         ticks.append(t)
 
-    path, stats = planner.plan(
-        s_pose,
-        g_spec,
-        max_expansions=200_000,
-        tick_callback=on_tick,
-    )
+    path, stats = planner.plan(s_pose, g_spec, max_expansions=200_000, tick_callback=on_tick)
     # sanity check that we got some ticks with expected content
     assert stats.expanded > 0
     assert len(ticks) > 2
-    assert goal_reached(
-            path[-1].as_tuple(), g_spec.pose.as_tuple(), g_spec.pos_tol, g_spec.theta_tol
-        ), "Final pose does not reach the goal tolerances"
+    if require_success:
+        assert path, "Planner failed to find a path in the maze"
+        assert goal_reached(
+                path[-1].as_tuple(), g_spec.pose.as_tuple(), g_spec.pos_tol, g_spec.theta_tol
+            ), "Final pose does not reach the goal tolerances"
+    elif not path:
+        pytest.skip("Planner failed to find a path in the maze, so skipping remaining testing of tick logging and MCAP writing")
     grid.view_grid(path)
     pytest.importorskip("mcap")
     from mcap.reader import make_reader

@@ -27,7 +27,13 @@ def vehicle_params():
 
 @pytest.fixture
 def planner_config(grid_spec, vehicle_params):
-    from src.structs import PlannerConfig
+    from src.structs import PlannerConfig, HeuristicParams
+    heuristics = HeuristicParams(
+        # keep the nonholonomic table smaller for tests
+        nh_table_xy_radius=8.0,
+        nh_table_xy_res=1.0,
+        nh_table_theta_res=np.deg2rad(10.0),
+    )
     return PlannerConfig(
         grid=grid_spec,
         vehicle=vehicle_params,
@@ -36,11 +42,8 @@ def planner_config(grid_spec, vehicle_params):
         # steering_samples=7,
         kappa_rate_samples=3,
         allow_reverse=True,
-        # keep the nonholonomic table smaller for tests
-        nh_table_xy_radius=8.0,
-        nh_table_xy_res=1.0,
-        nh_table_theta_res=np.deg2rad(10.0),
         footprint_sample_step=None,
+        heuristics=heuristics,
     )
 
 

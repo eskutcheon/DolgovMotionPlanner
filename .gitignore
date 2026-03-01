@@ -290,4 +290,5 @@ Testing/
 .cache/
 
 
+# omit outputs from the telemetry module
 outputs/

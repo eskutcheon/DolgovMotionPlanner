@@ -125,6 +125,7 @@ class OccupancyGrid:
         if path is not None:
             for p in path:
                 ix, iy = self.world_to_grid(p.x, p.y)
+                #? NOTE: doesn't count out-of-bounds entries as collisions, unlike elsewhere in the code
                 if 0 <= ix < self.occ.shape[1] and 0 <= iy < self.occ.shape[0]:
                     # mark collisions in red and other path poses in yellow
                     marker = RED + 'X' + RESET if self.occ[iy, ix] else YELLOW + 'o' + RESET
@@ -132,6 +133,7 @@ class OccupancyGrid:
         # print(grid_display)
         for row in grid_display:
             print("".join(row))
+        print() # newline after grid for readability
 
     def adjust_start_pose_for_clearance(self, start: Pose) -> Pose:
         """ if starting point is in obstacle, jitter to nearest neighbors until free """
@@ -154,8 +156,6 @@ class OccupancyGrid:
         return Pose(new_x, new_y, start.theta, start.kappa)
 
 
-
-
 # Voronoi Field (paper Eq. 1)
 class VoronoiField:
     """ $rho_V(x,y)$ shaped by distance-to-obstacles (and optionally GVD distance).
@@ -166,8 +166,9 @@ class VoronoiField:
     """
 
     def __init__(self, dO_m: np.ndarray, alpha: float, dO_max: float, dV_m: Optional[np.ndarray] = None):
-        self.dO = dO_m.astype(np.float64, copy=False)
-        self.dV = dV_m.astype(np.float64, copy=False) if dV_m is not None else None
+        # clamp to avoid division-by-zero; also means that when very close to obstacles, the potential will be near 1.0 as expected
+        self.dO = np.maximum(dO_m.astype(np.float64, copy=False), 1e-9)
+        self.dV = np.maximum(dV_m.astype(np.float64, copy=False), 1e-9) if dV_m is not None else None
         self.alpha = float(alpha)
         self.dO_max = float(dO_max)
 
@@ -176,23 +177,30 @@ class VoronoiField:
         """ Vectorized potential in [0,1] on the grid.
             NOTE: If $dV$ is not available, proxy it with $dV := dO$ (keeps a weak "skeleton-ish" scaling effect)
         """
-        alpha = float(self.alpha)
-        dO_max = float(self.dO_max)
-        dO = self.dO
-        dV = self.dV if self.dV is not None else dO
-        # potential modeled after Eq. (1) in the 2008 paper - clipped to [0,1]
-        a = np.clip(dO / dO_max, 0.0, 1.0)
-        b = 1.0 - np.clip(dV / dO_max, 0.0, 1.0)
-        rho = (a**alpha) * b
+        alpha = self.alpha
+        dO_max = self.dO_max
+        dV = self.dV if self.dV is not None else self.dO
+        # Voronoi field (scaled by obstacle distance and GVD distance) w/ standard convention rho=0 for dO >= dO_max
+        rho = np.zeros_like(self.dO, dtype=np.float64)
+        mask = self.dO <= dO_max
+        if np.any(mask):
+            t1 = alpha / (alpha + self.dO)
+            t2 = dV / (self.dO + dV)
+            t3 = ((self.dO - dO_max) ** 2) / (dO_max ** 2) #? NOTE: (drives to 0 at dO=dO_max)
+            # broadcasted multiplication - only compute where dO <= dO_max since otherwise rho=0
+            rho[mask] = (t1 * t2 * t3)[mask]
+        # # potential modeled after Eq. (1) in the 2008 paper - clipped to [0,1]
+        # a = np.clip(dO / dO_max, 0.0, 1.0)
+        # b = 1.0 - np.clip(dV / dO_max, 0.0, 1.0)
+        # rho = (a**alpha) * b
         # clamp numeric noise
         return np.clip(rho, 0.0, 1.0).astype(np.float64, copy=False)
-
 
 
 #? NOTE: both heuristic model classes have repeated use of some of the same discretization methods and may as well use a shared Indexer class
 class Indexer:
     """ Discretizes (x,y,theta,dir) and provides a flat index for best-g arrays """
-    def __init__(self, grid: OccupancyGrid, *, kappa_bins: Optional[int] = None, kappa_max: Optional[float] = None):
+    def __init__(self, grid: OccupancyGrid, kappa_bins: Optional[int] = None, kappa_max: Optional[float] = None):
         self.grid = grid
         self.W = int(grid.width)
         self.H = int(grid.height)
@@ -203,17 +211,26 @@ class Indexer:
         self.kappa_min = -self.kappa_max        # placeholder; should be set from PlannerConfig
         self.dkappa = (self.kappa_max - self.kappa_min) / self.kappa_bins
 
-    #? NOTE: DiscreteKey could be removed in favor of explicit tuples
-    def pose_to_key(self, pose: Pose) -> DiscreteKey:
+    def pose_to_key(self, pose: Pose, direction: int) -> DiscreteKey:
+        """ Discretize a continuous pose into a DiscreteKey
+            Args:
+                pose: continuous pose in world frame
+                direction: last motion mode (+1 forward, -1 reverse) used to arrive at this pose
+        """
         ix, iy = self.grid.world_to_grid(pose.x, pose.y)
         itheta = theta_to_bin(pose.theta, self.theta_bins, self.dtheta)
         ikappa = kappa_to_bin(pose.kappa, self.kappa_min, self.kappa_max, self.dkappa, self.kappa_bins)
-        return DiscreteKey(ix=ix, iy=iy, itheta=itheta, ikappa=ikappa) #direction=1 if direction >= 0 else -1)
+        d = 1 if direction >= 0 else -1
+        return DiscreteKey(ix=ix, iy=iy, itheta=itheta, ikappa=ikappa, direction=d)
 
     def key_to_flat(self, key: DiscreteKey) -> int:
         """ return flat packed index for best-g arrays """
-        return int((((key.iy * self.W + key.ix) * self.theta_bins + key.itheta) * self.kappa_bins + key.ikappa))
+        dir_idx = 0 if int(key.direction) >= 0 else 1
+        return int((((key.iy * self.W + key.ix) * self.theta_bins + key.itheta) * self.kappa_bins + key.ikappa) * 2 + dir_idx)
 
+    def get_total_states(self) -> int:
+        """ total number of discrete states in the grid (for dense best-g) """
+        return self.W * self.H * self.theta_bins * self.kappa_bins * 2 # factor of 2 for direction
 
 
 # ----------------------------
@@ -225,7 +242,7 @@ class BicycleModel:
         self.L = float(vehicle.wheelbase)
 
     # propagation approach uses curvature instead of steering angle
-    def propagate(self, pose: Pose, u: float, direction: int, ds: float, *, kappa_max: float) -> Pose:
+    def propagate(self, pose: Pose, u: float, direction: int, ds: float, kappa_max: float) -> Pose:
         r""" Propagate the bicycle model for distance $ds$ with curvature-rate $u$ and direction (+1 forward, -1 reverse)
             new system parameters:
                 $u  =  d\kappa / ds$
@@ -247,6 +264,50 @@ class BicycleModel:
         th1 = wrap_angle(th0 + sigma * km * ds)
         return Pose(x=x1, y=y1, theta=th1, kappa=k1)
 
+    # @staticmethod
+    # def propagate_const_kappa(pose: Pose, kappa: float, direction: int, ds: float, kappa_max = None) -> Pose:
+    #     """ Propagate the bicycle model for distance $ds$ with constant curvature $kappa$ and direction (+1 forward, -1 reverse) """
+    #     sigma = 1.0 if direction >= 0 else -1.0
+    #     x0, y0, th0 = pose.x, pose.y, pose.theta
+    #     # midpoint integration (same style as BicycleModel.propagate)
+    #     thm = th0 + 0.5 * sigma * kappa * ds
+    #     x1 = x0 + sigma * ds * math.cos(thm)
+    #     y1 = y0 + sigma * ds * math.sin(thm)
+    #     th1 = wrap_angle(th0 + sigma * kappa * ds)
+    #     return Pose(x=x1, y=y1, theta=th1, kappa=kappa)
+
+    # for step selection and collision checking - for now it needs access to the footprint cache and distance field on the planner
+    @staticmethod
+    def pose_is_free_fast(
+        pose: Pose,
+        grid: OccupancyGrid,
+        footprint_offsets: Optional[np.ndarray],
+        dO: float,
+        gate_radius_m: float = 0.0,
+        exact_check_margin_m: float = 0.0,
+        footprint_cache: Optional[Sequence[np.ndarray]] = None,
+        theta_bins: int = 0,
+    ) -> bool:
+        """ Use distance-to-obstacle gating + cached footprint when possible; fall back to exact footprint near obstacles
+            - if (dO >= gate_radius + exact_margin) => accept (reference point has ample clearance)
+            - if (gate_radius <= dO < gate_radius + exact_margin) and cache available => cached footprint cells
+            - if (dO < gate_radius) or cache missing => exact footprint sampling
+            NOTE: If gate_radius_m <= 0, gating is disabled and we always do the exact check.
+        """
+        # if gate radius checking is disabled, always do exact checks
+        if gate_radius_m <= 0.0:
+            return pose_is_free(pose, grid, footprint_offsets)
+        gate = float(gate_radius_m)
+        margin = max(0.0, float(exact_check_margin_m))
+        # wide clearance band that's safe by a conservative circumscribed-radius bound; helps to skip expensive footprint checks
+        if dO >= gate + margin:
+            return True
+        # Medium clearance band: use conservative cached cells if available
+        if footprint_cache is not None and theta_bins > 0 and dO >= gate:
+            it = theta_to_bin(pose.theta, theta_bins)
+            return pose_is_free_cached_cells(pose, grid, footprint_cache[it])
+        # Tight band: do the exact footprint check
+        return pose_is_free(pose, grid, footprint_offsets)
 
     def rollout(
         self,
@@ -258,7 +319,6 @@ class BicycleModel:
         kappa_max: float,
         grid: OccupancyGrid,
         footprint_offsets: Optional[np.ndarray],
-        *,
         dO_m: Optional[np.ndarray] = None,
         gate_radius_m: float = 0.0,
         exact_check_margin_m: float = 0.0,
@@ -266,7 +326,7 @@ class BicycleModel:
         theta_bins: int = 0,
         rho: Optional[np.ndarray] = None,
     ) -> Optional[Tuple[Pose, float]]: # ) -> Optional[Pose]:
-        r""" Propagate + collision-check along the edge; returns (endpoint, $\int \rho ds$) if collision-free else None. """
+        r""" Propagate + collision-check along the edge; returns (endpoint, $\int \rho ds$) if collision-free else None """
         step = float(ds) / float(n_substeps)
         cur = pose
         rho_int = 0.0
@@ -276,25 +336,21 @@ class BicycleModel:
             ix, iy = grid.world_to_grid(cur.x, cur.y)
             if not grid.in_bounds(ix, iy):
                 return None
-            # TODO: would prefer to use memoization through functools rather than explicitly handling footprint_cache here
-            # conservative distance-transform checkpoint: if reference point has enough clearance, accept immediately
-            if (dO_m is None) or (gate_radius_m <= 0.0) or (float(dO_m[iy, ix]) < float(gate_radius_m)):
-                # Use cached footprint when not extremely tight; fall back to exact footprint near obstacles
-                if (
-                    footprint_cache is not None
-                    and theta_bins > 0
-                    and dO_m is not None
-                    and float(dO_m[iy, ix]) >= float(gate_radius_m) + float(exact_check_margin_m)
-                ):
-                    it = theta_to_bin(cur.theta, theta_bins)
-                    if not pose_is_free_cached_cells(cur, grid, footprint_cache[it]):
-                        return None
-                else:
-                    if not pose_is_free(cur, grid, footprint_offsets):
-                        return None
+        clearance = float(dO_m[iy, ix])
+        # conservative distance-transform gating + cached footprint band
+        if dO_m is None or gate_radius_m <= 0.0:
+            if not pose_is_free(cur, grid, footprint_offsets):
+                return None
+        else:
+            if not BicycleModel.pose_is_free_fast(
+                cur, grid, footprint_offsets, clearance,
+                gate_radius_m=float(gate_radius_m),
+                footprint_cache=footprint_cache,
+                theta_bins=int(theta_bins),
+            ):
+                return None
             # integrate Voronoi cost if available
             if rho is not None:
                 rho_int += float(rho[iy, ix]) * step
         return cur, float(rho_int)
-
 

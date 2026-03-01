@@ -1,11 +1,11 @@
 # src/planners/planner_base.py
 
-from typing import Dict, List, Optional, Tuple, Union, TypeAlias, Callable
+from typing import List, Optional, Tuple, TypeAlias, Callable
 import heapq
 import time
 import numpy as np
 # local module imports
-from src.structs import Pose, GoalSpec, PlannerStats, HybridNode, PlannerConfig, PlannerTick #, DiscreteKey
+from src.structs import Pose, GoalSpec, PlannerStats, HybridNode, PlannerConfig, PlannerTick
 from src.models import *
 from src.utils import (
     SQRT2, wrap_angle, pose_is_free, compute_distance_to_obstacles_m, make_rectangle_footprint_offsets,
@@ -15,13 +15,13 @@ from src.utils import (
 
 # planner tick callback type alias for telemetry integration - accepts a PlannerTick object containing the current search state and statistics, and returns None
 TickCallback: TypeAlias = Callable[[PlannerTick], None]
-# type alias for the best-g structure, which can be either a dense numpy array or a sparse dict depending on the configuration
-BestGType: TypeAlias = Union[np.ndarray, Dict[Tuple[int, int], float]]
 # stores the current frontier of the analytic beam search, sorted by a terminal score that combines distance to goal with heuristic guidance
 SearchFrontierType: TypeAlias = List[Tuple[float, Pose, List[Pose], int, float, float]]
 
 
-
+# TODO: maybe try to use a producer-consumer pattern so this can run on a separate thread while consuming actions from queue published to by the planner
+    # key to topics by callback names (e.g., on_expand, on_rollout_failure) and have the planner publish relevant data to relevant topics
+    # empty data stream would still have commands for simple actions like incrementing class variables
 class PlannerEventStream:
     """ small event collector for planner stats and optional tick snapshots """
     def __init__(self, stats: PlannerStats, start_time_s: float, callback: Optional[TickCallback], stride: int):
@@ -30,7 +30,7 @@ class PlannerEventStream:
         self.callback = callback
         self.stride = max(1, int(stride))
         self.explored_since_tick: List[Pose] = []
-        # TODO: might want to replace this with something simpler like the node ids
+        # TODO: improve storage efficiency by only preserving the indices of relevant explored edges and reconstructing the poses from the nodes list
         self.explored_edges_since_tick: List[Tuple[Pose, Pose]] = []
         self.collisions_since_tick: List[Pose] = []
         self.pruned_trajectories_since_tick: List[List[Pose]] = []
@@ -99,18 +99,17 @@ class PlannerEventStream:
         self.stats.ticks_emitted += 1
 
 
+
 class HybridAStarPlannerBase:
     """ Hybrid A* planner (Dolgov et al. style)
         Reference Hybrid A*:
             - heap open-set
             - continuous pose stored in node (Hybrid A* "continuous state in discrete nodes")
-
         Multi-thread preparation:
             - All persistent data on the planner is read-only after __init__.
             - Per-call state (open set, best-g arrays, goal-dependent heuristics) is allocated in `plan()` to allow concurrency
             - The C++ kernel releases the GIL during the search loop so Python threads can run concurrently.
     """
-
     def __init__(
         self,
         occ_grid: OccupancyGrid,
@@ -129,36 +128,40 @@ class HybridAStarPlannerBase:
         # curvature samples used to generate edges during search ($u \in \{-\kappa_{max}, 0, +\kappa_{max}\}$)
         self.u_set = np.linspace(-u_max, u_max, m, dtype=np.float64) if m > 1 else np.array([0.0], dtype=np.float64)
         # Footprint offsets for collision checking.
-        self.footprint_offsets: Optional[np.ndarray]
+        self.footprint_offsets: Optional[np.ndarray] = None
         if use_rectangle_footprint:
             # using 0.25 multiplier to get denser sampling than old default (0.5*resolution)
             step = config.footprint_sample_step or 0.25 * float(config.grid.resolution)
             self.footprint_offsets = make_rectangle_footprint_offsets(
                 Vehicle.wheelbase, Vehicle.width, Vehicle.front_overhang, Vehicle.rear_overhang, step
             )
-        else:
-            self.footprint_offsets = None
         # Map-dependent fields (goal-independent) can be cached safely.
-        self._dO = compute_distance_to_obstacles_m(self.map.occ, float(self.map.grid.resolution))
+        self._dO = compute_distance_to_obstacles_m(self.map.occ, self.map.grid.resolution)
         self._dV: Optional[np.ndarray] = None
         self._rho: Optional[np.ndarray] = None
-        if use_voronoi_edge_cost and float(config.weights.voronoi_weight) > 0.0:
-            self._dV = compute_gvd_distance_m(self._dO, float(self.map.grid.resolution))
+        if use_voronoi_edge_cost and config.weights.voronoi_weight > 0.0:
+            # TODO: consider making compute_gvd_distance into a class method of VoronoiField and having it persist rather than instantiating just for rho
+            #   making it persist is likely necessary for later if we move into dynamic rho fields that depend on the current state of the search
+            #       (e.g., learned cost-to-go or dynamic obstacles); for now we compute it once below since it's a purely geometric property of the map
+            # self._dV = compute_gvd_distance_m(self._dO, self.map.grid.resolution)
+            self._dV = compute_gvd_distance_m(occ_grid.occ, config.grid.resolution)
             self._rho = VoronoiField(self._dO, self.cfg.voronoi_alpha, self.cfg.voronoi_dO_max, dV_m=self._dV).rho
         #& UPDATE: new path smoothing object does actual nonlinear optimization for refinement
         self.refiner = PathRefiner(self.map, self.cfg.smoother, self._dO, self.cfg.kappa_max, footprint_offsets=self.footprint_offsets, rho=self._rho)
+        self.goal_shot_mode = str(getattr(self.cfg.connector, "mode", "beam")).lower().strip()
         # Conservative collision gate radius (distance-transform) + cached footprint per theta bin
         res = float(self.map.grid.resolution)
         # print("SANITY CHECK: map resolution: ", res)
         radius = rectangle_circumscribed_radius(Vehicle.wheelbase, Vehicle.width, Vehicle.front_overhang, Vehicle.rear_overhang)
-        self._gate_radius_m = radius + 0.5 * res * SQRT2
+        self._gate_radius_m = 0.5 * radius + 0.5 * res * SQRT2
         self._exact_margin_m = float(res)
         self._footprint_cache: Optional[List[np.ndarray]] = None
         if self.footprint_offsets is not None:
             self._footprint_cache = build_orientation_binned_footprint_cache(self.footprint_offsets, res, int(self.cfg.grid.theta_bins), dilate_cells=1)
         # Non-holonomic goal-local heuristic table is goal-independent and can be cached
-        self._nonhol = NonHolonomicWithoutObstaclesTable(config)
-        self._nonhol.build_offline()
+        if self.cfg.heuristics.use_nonholonomic:
+            self._nonhol = NonHolonomicWithoutObstaclesTable(config)
+            self._nonhol.build_offline()
 
 
     def plan(
@@ -167,18 +170,36 @@ class HybridAStarPlannerBase:
     ) -> Tuple[List[Pose], PlannerStats]:
         raise NotImplementedError("HybridAStarPlannerBase is an abstract base class; subclasses should implement plan()")
 
+    def _smooth_path(self, path: List[Pose]) -> List[Pose]:
+        """ Lightweight post-search smoothing pass on (x,y,theta,kappa) with collision safeguards """
+        if not self.cfg.use_path_smoothing or len(path) < 5:
+            return path
+        return self.refiner.smooth_path(path)
 
     def _heuristic(self, pose: Pose, goal: GoalSpec, h2d: HolonomicWithObstacles2D) -> float:
         # Paper uses max(h_holonomic, h_nonholonomic)
         h_hol = h2d(pose)
-        h_nh = self._nonhol(pose, goal.pose)
-        return max(float(h_hol), float(h_nh))
+        if self.cfg.heuristics.use_nonholonomic:
+            h_nh = self._nonhol(pose, goal.pose)
+            return max(float(h_hol), float(h_nh))
+        return float(h_hol)
 
     def _build_goal_heuristics(self, goal: GoalSpec) -> HolonomicWithObstacles2D:
         # h2d = HolonomicWithObstacles2D(self.map, cost_per_cell=self._rho, dO_m=self._dO, min_clearance_m=self._gate_radius_m)
         # for mazes/corridors, don't prune cells by circumscribed radius here; let the continuous collision checker handle feasibility
             #? NOTE: test with `test_python_backend_can_pass_through_gap`
-        h2d = HolonomicWithObstacles2D(self.map, cost_per_cell=self._rho, dO_m=self._dO, min_clearance_m=0.0)
+        h_cost = self._rho
+        if self._rho is not None and self.cfg.weights.voronoi_weight > 0.0 and self.cfg.heuristics.use_voronoi:
+            # keep 2D heuristic consistent with the edge cost - edge uses $$w_V * \int \rho ds$$
+            h_cost *= float(self.cfg.weights.voronoi_weight)
+        h2d = HolonomicWithObstacles2D(
+            self.map,
+            cost_per_cell=h_cost,
+            dO_m=self._dO,
+            min_clearance_m=self._gate_radius_m, #0.0
+            soft_clearance_m = self.cfg.heuristics.h2d_soft_clearance_m,
+            soft_clearance_weight = self.cfg.heuristics.h2d_soft_clearance_weight
+        )
         h2d.compute(goal.pose)
         return h2d
 
@@ -189,22 +210,20 @@ class HybridAStarPlannerBase:
         if (dx * dx + dy * dy) > goal.pos_tol**2:
             return False
         dth = wrap_angle(pose.theta - goal.pose.theta)
-        # early exit on theta tolerance, so final check is for kappa
-        if abs(dth) > goal.theta_tol:
-            return False
-        dkappa = pose.kappa - goal.pose.kappa
-        return abs(dkappa) <= goal.kappa_tol
+        return abs(dth) <= goal.theta_tol
 
     def _edge_cost(self, ds: float, direction: int, prev_direction: int, u: float, prev_u: float, rho_int: float) -> float:
         W = self.cfg.weights
         c = ds
         if direction < 0:
+            #& UPDATE: just realized I had the reverse penalty in range [0, 1], essentially making this a reward; changing default to 1.1
             c *= W.reverse_penalty
+        # TODO: investigate adding the switch penalty as a kronecker delta term in the integration cost function
         if direction != prev_direction:
-            c += float(W.switch_dir_penalty)
+            c += W.switch_dir_penalty # hard to believe but any multiplicative factor up to 4x doesn't really help
         # curvature-rate regularization (smooth steering evolution)
-        c += float(W.kappa_rate_weight) * float(u * u) * float(ds)
-        c += float(W.kappa_rate_change_weight) * abs(float(u - prev_u))
+        # c += W.kappa_rate_weight * ds + W.kappa_rate_change_weight # * abs(u - prev_u)
+        c += W.kappa_rate_weight * u**2 * ds + W.kappa_rate_change_weight * abs(u - prev_u)
         # integrated Voronoi cost along the edge ($ \rho \in \[0,1\] $) if enabled
         if rho_int > 0.0 and float(W.voronoi_weight) > 0.0:
             c += float(W.voronoi_weight) * float(rho_int)
@@ -223,18 +242,20 @@ class HybridAStarPlannerBase:
     def _validate_path_exact(self, path: List[Pose], verbose: bool = False) -> bool:
         """ exact pose-by-pose footprint validation - starting at the goal and working backwards to the start (for better debugging of failure cases) """
         if verbose:
+            # self.map.view_grid(path) #! DEBUGGING
+            #! FIXME: might want to make another argument for pose_is_free to optionally count out-of-bounds entries as collisions
             all_coll = [p for p in path if not pose_is_free(p, self.map, self.footprint_offsets)]
             # print(f"Validating path with {len(path)} poses, {len(all_coll)} in collision, starting from goal:")
             for coll in all_coll[::-1]:  # print in reverse order (from start to goal)
                 ix, iy = self.map.world_to_grid(coll.x, coll.y)
                 print("Collision at pose: ", coll, " - grid indices: ", (iy, ix), "dO at cell: ", self._dO[iy, ix])
             return len(all_coll) == 0
-        for p in path:
-            if not pose_is_free(p, self.map, self.footprint_offsets):
-                return False
-        return True
+        return all(pose_is_free(p, self.map, self.footprint_offsets) for p in path)
 
     def _should_try_analytic(self, pose: Pose, goal: Pose, expanded: int) -> bool:
+        # Centralize enable/disable so it behaves consistently across modes
+        if not self.cfg.use_analytic_connector:
+            return False
         # if self.cfg.analytic_every_n <= 0 or expanded % self.cfg.analytic_every_n != 0:
         analytic = self.cfg.analytic
         if analytic.every_n <= 0:
@@ -279,25 +300,33 @@ class HybridAStarPlannerBase:
         return ds
 
     def _pose_is_free_fast(self, pose: Pose) -> bool:
-        """ Use gate + cached footprint when possible; fall back to exact footprint near obstacles """
+        """ helper method for calling the model's pose_is_free_fast with all the necessary parameters from the planner """
         ix, iy = self.map.world_to_grid(pose.x, pose.y)
         if not self.map.in_bounds(ix, iy):
             return False
-        if float(self._dO[iy, ix]) >= float(self._gate_radius_m):
-            return True
-        if self._footprint_cache is not None and float(self._dO[iy, ix]) >= float(self._gate_radius_m) + float(self._exact_margin_m):
-            # Conservative cached check is safe here - (exact theta bin selection occurs inside rollout; using exact for safety)
-            return True
-        # tight / ambiguous: do exact footprint check
-        is_free = pose_is_free(pose, self.map, self.footprint_offsets)
-        return is_free
+        # #! OLDER VERSION - testing for source of regression
+        # clearance = float(self._dO[iy, ix])
+        # if clearance >= self._gate_radius_m:
+        #     return True
+        # if self._footprint_cache is not None and clearance >= self._gate_radius_m + self._exact_margin_m:
+        #     # Conservative cached check is safe here - (exact theta bin selection occurs inside rollout; using exact for safety)
+        #     return True
+        # # tight / ambiguous: do exact footprint check
+        # is_free = pose_is_free(pose, self.map, self.footprint_offsets)
+        # return is_free
+        return self.model.pose_is_free_fast(
+            pose, self.map, self.footprint_offsets, dO=float(self._dO[iy, ix]),
+            gate_radius_m=self._gate_radius_m, exact_check_margin_m=self._exact_margin_m,
+            footprint_cache=self._footprint_cache, theta_bins=self.cfg.grid.theta_bins,
+        )
 
 
     def _terminal_score(self, pose: Pose, goal: GoalSpec, h2d: HolonomicWithObstacles2D) -> float:
         dp = float(np.hypot(pose.x - goal.pose.x, pose.y - goal.pose.y))
         dth = abs(wrap_angle(pose.theta - goal.pose.theta))
-        dk = abs(float(pose.kappa - goal.pose.kappa))
-        score = sum(w * val for w, val in zip(self.cfg.connector.terminal_score_weights, (dp, dth, dk)))
+        # dk = abs(float(pose.kappa - goal.pose.kappa))
+        score = sum(w * val for w, val in zip(self.cfg.connector.terminal_score_weights(), (dp, dth))) #, dk)))
+        # TODO: add config setting for the heuristic weight in the score
         return score + 0.1 * self._heuristic(pose, goal, h2d)
 
 
@@ -324,8 +353,22 @@ class HybridAStarPlannerBase:
         return result
 
 
-    #! FIXME: not in line with the stats and planner tick classes
-    def _try_goal_shot(self, start_pose: Pose, goal: GoalSpec, h2d: HolonomicWithObstacles2D, events: Optional[PlannerEventStream] = None) -> Optional[List[Pose]]:
+    def _try_goal_shot(
+        self, start_pose: Pose, goal: GoalSpec, h2d: HolonomicWithObstacles2D, events: Optional[PlannerEventStream] = None
+    ) -> Optional[List[Pose]]:
+        if not self.cfg.use_analytic_connector:
+            return None
+        if self.goal_shot_mode == "rs":
+            return self._try_goal_shot_rs(start_pose, goal, h2d, events)
+        elif self.goal_shot_mode == "beam":
+            return self._try_goal_shot_beam(start_pose, goal, h2d, events)
+        else:
+            raise ValueError(f"Unknown goal shot mode: {self.goal_shot_mode}")
+
+    # TODO: maybe make these global or util methods that accept all the class attributes they need?
+    def _try_goal_shot_beam(
+        self, start_pose: Pose, goal: GoalSpec, h2d: HolonomicWithObstacles2D, events: Optional[PlannerEventStream] = None
+    ) -> Optional[List[Pose]]:
         r""" Fast 'analytic-like' attempt: greedily roll out a short sequence of $(\sigma,u)$ to reach the goal tolerance """
         horizon = max(4, int(self.cfg.connector.connector_horizon))
         beam_width = max(2, int(self.cfg.connector.connector_beam_width))
@@ -351,27 +394,53 @@ class HybridAStarPlannerBase:
                         if rollout_result is None:
                             continue
                         nxt, rho_int = rollout_result
-                        key = self.indexer.pose_to_key(nxt)
-                        nxt_key = (*key.as_tuple(), direction)
-                        if nxt_key in seen_keys:
+                        key = self.indexer.pose_to_key(nxt, direction) #& UPDATE: now that direction is included in the key, we can just use that directly for duplicate detection instead of a separate tuple
+                        key_tuple = key.as_tuple()
+                        if key_tuple in seen_keys:
                             continue
-                        seen_keys.add(nxt_key)
+                        seen_keys.add(key_tuple)
                         cost = local_cost + self._edge_cost(ds, direction, prev_dir, u, prev_u, rho_int)
                         tscore = cost + self._terminal_score(nxt, goal, h2d)
                         nxt_path = path + [nxt]
                         candidates.append((tscore, nxt, nxt_path, direction, u, cost))
                         if tscore < best_score:
                             best_score, best_path = tscore, nxt_path
-                if not candidates:
+                if not candidates: # if no beam member produced any candidate, the connector is stuck
                     break
+                # get best candidates across all current beam members
                 beam = heapq.nsmallest(beam_width, candidates, key=lambda it: it[0])
+                if not beam:
+                    break
         if best_path and self._goal_reached(best_path[-1], goal):
             return best_path
         return None
 
-
-    def _smooth_path(self, path: List[Pose]) -> List[Pose]:
-        """ Lightweight post-search smoothing pass on (x,y,theta,kappa) with collision safeguards """
-        if not self.cfg.use_path_smoothing or len(path) < 5:
-            return path
-        return self.refiner.smooth_path(path)
+    def _try_goal_shot_rs(
+        self, start_pose: Pose, goal: GoalSpec, h2d: HolonomicWithObstacles2D, events: Optional[PlannerEventStream] = None
+    ) -> Optional[List[Pose]]:
+        """ Reeds-Shepp analytic shot (collision-checked) """
+        #! FIXME: need to align with paper by wiring up h2d into the Reeds-Shepp shot generation similarly to the beam search
+        # clamp to avoid degenerate case for straight-line shots; also ensures that the step size is well-defined in the reeds_shepp_shot function
+        kappa_max = max(self.cfg.kappa_max, 1e-6)
+        turn_radius = 1.0 / kappa_max
+        step = float(getattr(self.cfg.connector, "rs_step", 0.25))
+        step = max(0.05, step)  # avoid degenerate sampling
+        cand = reeds_shepp_shot(
+            start=start_pose,
+            goal=goal.pose,
+            turning_radius=turn_radius,
+            step_size=step,
+            allow_reverse=self.cfg.allow_reverse,
+        )
+        if not cand:
+            return None
+        # enforce goal curvature basin (search state includes kappa) while leaving a smooth transition to the refiner
+        cand[-1] = Pose(x=cand[-1].x, y=cand[-1].y, theta=cand[-1].theta, kappa=goal.pose.kappa)
+        for p in cand:
+            if not pose_is_free(p, self.map, self.footprint_offsets):
+                return None
+        # Return the relative segment to be spliced after the prefix (exclude the start pose)
+        shot_path = cand[1:]
+        if events is not None:
+            events.on_analytic_shot(shot_path)
+        return shot_path

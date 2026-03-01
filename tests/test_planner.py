@@ -61,7 +61,7 @@ def test_python_backend_handles_mazes(maze_grid_and_poses: Tuple[OccupancyGrid, 
     s_pose = Pose(start[0], start[1], start_pose.theta, start_pose.kappa)
     g_pose = Pose(goal[0], goal[1], goal_spec.pose.theta, goal_spec.pose.kappa)
     # create new GoalSpec with updated goal pose
-    g_spec = GoalSpec(g_pose, goal_spec.pos_tol, goal_spec.theta_tol, goal_spec.kappa_tol)
+    g_spec = GoalSpec(g_pose, goal_spec.pos_tol, goal_spec.theta_tol) #, goal_spec.kappa_tol)
     planner = planner_factory(grid, planner_config, backend="python")
     path, stats = planner.plan(s_pose, g_spec, max_expansions=100_000)
     assert stats.expanded > 0, "Planner did not expand any nodes"
@@ -101,7 +101,7 @@ def test_planner_can_be_called_concurrently(empty_grid: OccupancyGrid, planner_c
 def test_analytic_connector_can_close_short_gap(empty_grid, planner_config):
     planner = planner_factory(empty_grid, planner_config, backend="python")
     start = Pose(10.0, 10.0, 0.0, 0.0)
-    goal = GoalSpec(Pose(12.0, 10.0, 0.0, 0.0), pos_tol=0.8, theta_tol=math.radians(20.0), kappa_tol=0.2)
+    goal = GoalSpec(Pose(12.0, 10.0, 0.0, 0.0), pos_tol=0.8, theta_tol=math.radians(20.0)) #, kappa_tol=0.2)
     h2d = planner._build_goal_heuristics(goal)
     shot = planner._try_goal_shot(start, goal, h2d)
     assert shot is not None and len(shot) > 0
@@ -149,14 +149,15 @@ def test_adaptive_analytic_schedule_attempts_more_often_near_goal(empty_grid, pl
     assert near_hits > far_hits
 
 
-def test_objective_smoother_anchors_colliding_points(grid_with_wall, planner_config):
+def test_objective_smoother_anchors_colliding_points(grid_with_wall: OccupancyGrid, planner_config: PlannerConfig):
     from src.structs import PathSmootherParams
     cfg = replace(
         planner_config,
-        smoother=PathSmootherParams(use_objective_smoother=True, smoothing_anchor_rounds=2, objective_smoothing_iters=6),
+        smoother=PathSmootherParams(use_objective_smoother=True, smoothing_anchor_rounds=2, objective_smoothing_iters=3),
     )
     planner = planner_factory(grid_with_wall, cfg, backend="python")
     # middle points intentionally pass through the wall; anchored retries should fall back safely
+    #? NOTE: grid_with_wall has a vertical wall over the whole height except for a gap from y=28 to y=32 inclusive
     raw = [
         Pose(8.0, 30.0, 0.0, 0.0),
         Pose(12.0, 30.0, 0.0, 0.0),

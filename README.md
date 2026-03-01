@@ -70,7 +70,7 @@ python -m venv .env
 ### Troubleshooting
 
 - **`ImportError: No module named hybrid_core`**
-  - The extension wasn’t built. Re-run `python -m pip install -e .`.
+  - The extension wasn't built. Re-run `python -m pip install -e .`.
 
 - **Windows/MSVC flag issues**
   - `setup.py` selects MSVC-friendly optimization flags (`/O2`). If your environment still errors, remove `extra_compile_args` temporarily and try again
