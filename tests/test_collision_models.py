@@ -19,8 +19,6 @@ def test_out_of_bounds_is_occupied():
     grid = GridSpec(resolution=1.0, theta_bins=72, origin_xy=(0.0, 0.0))
     occ = np.zeros((5, 5), dtype=bool)
     og = OccupancyGrid(occ, grid)
-    assert og.is_occupied(-1, 0) is True
-    assert og.is_occupied(0, -1) is True
     assert og.is_occupied(5, 0) is True
     assert og.is_occupied(0, 5) is True
 

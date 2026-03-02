@@ -11,32 +11,32 @@
         - Optional analytic expansion hook (e.g., Reeds-Shepp), collision-checked against the map
 """
 
-import math
+# import math
 import numpy as np
 # local module imports
-from src.structs import GridSpec, VehicleParams, Pose, GoalSpec, PlannerConfig #, PlannerStats, PlannerTick
+# from src.structs import GridSpec, VehicleParams, Pose, GoalSpec, PlannerConfig
+from src.settings import parse_planning_inputs
 from src.models import OccupancyGrid
 from src.planners import planner_factory
 
 
 
-def plan_example(backend: str = "python") -> None:
+def plan_example() -> None:
+    args = parse_planning_inputs()
     # Toy map (mostly empty) with a thin vertical obstacle.
     occ = np.zeros((200, 200), dtype=bool)
     occ[80:120, 100] = True
-    grid = GridSpec(resolution=0.5, theta_bins=36, origin_xy=(0.0, 0.0), kappa_bins=11)
-    og = OccupancyGrid(occ, grid)
-    print("grid created: ", grid)
-    cfg = PlannerConfig(grid=grid, vehicle=VehicleParams())
-    print("planner config: ", cfg)
-    planner = planner_factory(og, cfg, backend=backend)
-    print("planner created with backend:", backend)
-    start = Pose(5.0, 5.0, math.radians(0.0), 0.0)
-    goal = GoalSpec(Pose(80.0, 80.0, math.radians(90.0), 0.0))
-    path, stats = planner.plan(start, goal, max_expansions=100_000)
+    og = OccupancyGrid(occ, args.planner_config.grid)
+    print("grid created:", args.planner_config.grid)
+    # print("planner config:", args.planner_config)
+    print("start:", args.start)
+    print("goal:", args.goal)
+    planner = planner_factory(og, args.planner_config, backend=args.backend)
+    print("planner created with backend:", args.backend)
+    path, stats = planner.plan(args.start, args.goal, max_expansions=args.max_expansions)
     print("planning completed.")
     print(
-        f"backend={backend} | path poses={len(path)} | expanded={stats.expanded} | "
+        f"backend={args.backend} | path poses={len(path)} | expanded={stats.expanded} | "
         f"pushed={stats.pushed} | elapsed={stats.elapsed_s():.3f}s"
     )
 

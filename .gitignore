@@ -292,3 +292,4 @@ Testing/
 
 # omit outputs from the telemetry module
 outputs/
+tests/configs/

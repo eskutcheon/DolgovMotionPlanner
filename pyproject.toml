@@ -9,7 +9,7 @@ name = "dolgov-path-planning"
 version = "0.1.0"
 description = "Hybrid A* path planning (Dolgov et al.) with optional C++ kernel"
 requires-python = ">=3.10"
-dependencies = ["numpy", "scipy", "pillow"]
+dependencies = ["numpy", "scipy", "pillow", "pydantic>=2", "PyYAML>=6"]
 readme = {file="README.md", content-type="text/markdown"}
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -26,4 +26,3 @@ dev = ["pytest>=7.0", "pybind11>=2.10"]
 #! FIXCHANGE: should be unnecessary - the main entry point will likely be pytest or a CLI script later
 [tool.setuptools]
 py-modules = ["main", "planners", "models", "structs", "utils", "cpp_kernels"]
-

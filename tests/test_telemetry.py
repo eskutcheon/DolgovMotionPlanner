@@ -52,11 +52,11 @@ def test_tick_to_markers_includes_trajectory_and_collision_points(sample_tick: P
     assert payload["markers"][6]["namespace"] == "planner/analytic_shot"
 
 
-def test_tick_write_mcap(tmp_path: Path, sample_tick: PlannerTick):
+def test_tick_write_mcap(mcap_out_dir: Path, sample_tick: PlannerTick):
     pytest.importorskip("mcap")
     from src.telemetry import write_ticks_mcap
     pytest.importorskip("mcap")
-    out = tmp_path / "ticks.mcap"
+    out = mcap_out_dir / "ticks.mcap"
     write_ticks_mcap([sample_tick], out)
     assert out.exists()
     assert out.stat().st_size > 0
@@ -64,7 +64,7 @@ def test_tick_write_mcap(tmp_path: Path, sample_tick: PlannerTick):
     assert out.read_bytes()[:8] == bytes([0x89, 0x4D, 0x43, 0x41, 0x50, 0x30, 0x0D, 0x0A])
 
 
-def test_tick_write_mcap_roundtrip_json(tmp_path: Path, sample_tick):
+def test_tick_write_mcap_roundtrip_json(mcap_out_dir: Path, sample_tick):
     pytest.importorskip("mcap")
     from src.telemetry import write_ticks_mcap
     # spoof some ticks with different iterations for testing
@@ -73,7 +73,7 @@ def test_tick_write_mcap_roundtrip_json(tmp_path: Path, sample_tick):
         replace(sample_tick, iteration=11, time_s=0.30, expanded=11),
         replace(sample_tick, iteration=12, time_s=0.35, expanded=12),
     ]
-    out_path = tmp_path / f"raw_{uuid4().hex}.mcap"
+    out_path = mcap_out_dir / f"raw_{uuid4().hex}.mcap"
     write_ticks_mcap(ticks, out_path)
     records = _read_mcap_messages(out_path)
     # ensure at least one message per tick and that all messages are on the expected topic
@@ -89,14 +89,14 @@ def test_tick_write_mcap_roundtrip_json(tmp_path: Path, sample_tick):
         assert payload["tick"]["iteration"] == t.iteration
 
 
-def test_tick_write_mcap_ns_time(tmp_path: Path, sample_tick):
+def test_tick_write_mcap_ns_time(mcap_out_dir: Path, sample_tick):
     pytest.importorskip("mcap")
     from src.telemetry import write_ticks_mcap
     ticks = [
         replace(sample_tick, time_s=0.25),
         replace(sample_tick, time_s=1.00),
     ]
-    out_path: Path = tmp_path / f"raw_time_{uuid4().hex}.mcap"
+    out_path: Path = mcap_out_dir / f"raw_time_{uuid4().hex}.mcap"
     write_ticks_mcap(ticks, out_path)
     records = _read_mcap_messages(out_path)
     assert len(records) == len(ticks)
@@ -107,13 +107,13 @@ def test_tick_write_mcap_ns_time(tmp_path: Path, sample_tick):
         assert msg.publish_time == expected_ns
 
 
-def test_tick_write_jsonl_lines(tmp_path: Path, sample_tick):
+def test_tick_write_jsonl_lines(mcap_out_dir: Path, sample_tick):
     from src.telemetry import write_ticks_jsonl
     ticks = [
         sample_tick,
         replace(sample_tick, iteration=11, time_s=0.30, expanded=11),
     ]
-    out_path: Path = tmp_path / f"ticks_{uuid4().hex}.jsonl"
+    out_path: Path = mcap_out_dir / f"ticks_{uuid4().hex}.jsonl"
     write_ticks_jsonl(ticks, out_path)
     lines = out_path.read_text(encoding="utf-8").splitlines()
     # ensure one line per tick and that each line is valid JSON with expected keys
@@ -123,7 +123,7 @@ def test_tick_write_jsonl_lines(tmp_path: Path, sample_tick):
     assert "markers" in row0
 
 
-def test_tick_foxglove_mcap_topics(tmp_path, sample_tick):
+def test_tick_foxglove_mcap_topics(mcap_out_dir, sample_tick):
     """ test that the Foxglove MCAP writer publishes to expected topics, with expected encodings and payload structure """
     pytest.importorskip("foxglove")
     from src.telemetry import write_ticks_mcap_foxglove as write_fg_mcap
@@ -131,7 +131,7 @@ def test_tick_foxglove_mcap_topics(tmp_path, sample_tick):
         sample_tick,
         replace(sample_tick, iteration=11, time_s=0.30, expanded=11),
     ]
-    out_path = tmp_path / f"fg_{uuid4().hex}.mcap"
+    out_path = mcap_out_dir / f"fg_{uuid4().hex}.mcap"
     write_fg_mcap(ticks, out_path)
     by_topic = _read_mcap_by_topic(out_path)
     # emsure presence of topics the Foxglove writer logs: scene + two pointclouds + raw tick-as-json
@@ -151,7 +151,7 @@ def test_tick_foxglove_mcap_topics(tmp_path, sample_tick):
 
 
 @pytest.mark.slow
-def test_tick_planner_logs_and_writes_mcap(tmp_path, empty_grid, planner_config):
+def test_tick_planner_logs_and_writes_mcap(mcap_out_dir, empty_grid, planner_config):
     from src.planners import planner_factory
     # tick_callback is only supported in the python backend in your code today
     planner = planner_factory(empty_grid, planner_config, backend="python")
@@ -179,11 +179,11 @@ def test_tick_planner_logs_and_writes_mcap(tmp_path, empty_grid, planner_config)
     pytest.importorskip("mcap")
     from mcap.reader import make_reader
     from src.telemetry import write_ticks_mcap as write_raw_mcap
-    raw_path = tmp_path / f"sim_raw_{uuid4().hex}.mcap"
+    raw_path = mcap_out_dir / f"sim_raw_{uuid4().hex}.mcap"
     write_raw_mcap(ticks, raw_path)
     pytest.importorskip("foxglove")
     from src.telemetry import write_ticks_mcap_foxglove
-    fg_path = tmp_path / f"sim_fg_{uuid4().hex}.mcap"
+    fg_path = mcap_out_dir / f"sim_fg_{uuid4().hex}.mcap"
     write_ticks_mcap_foxglove(ticks, fg_path)
     # check that both files are readable, i.e. have the magic header and at least one message
     for p in (raw_path, fg_path):
@@ -195,7 +195,7 @@ def test_tick_planner_logs_and_writes_mcap(tmp_path, empty_grid, planner_config)
 
 @pytest.mark.slow
 def test_tick_planner_logs_mazes_and_writes_mcap(
-    tmp_path: Path,
+    mcap_out_dir: Path,
     maze_grid_and_poses: Tuple[Any, List[float], List[float]],
     planner_config: PlannerConfig,
     start_pose: Pose,
@@ -231,7 +231,7 @@ def test_tick_planner_logs_mazes_and_writes_mcap(
     from mcap.reader import make_reader
     pytest.importorskip("foxglove")
     from src.telemetry import write_ticks_mcap_foxglove
-    fg_path = tmp_path / f"full_sim_fg_{uuid4().hex}.mcap"
+    fg_path = mcap_out_dir / f"full_sim_fg_{uuid4().hex}.mcap"
     write_ticks_mcap_foxglove(ticks, fg_path, occ_grid=grid, start_pose=s_pose, goal=g_spec, vehicle=planner_config.vehicle)
     # check that both files are readable, i.e. have the magic header and at least one message
     for p in (fg_path, fg_path):

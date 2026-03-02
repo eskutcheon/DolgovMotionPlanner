@@ -1,6 +1,6 @@
 
 import sys
-from typing import Tuple, List, Optional, Any
+from typing import Tuple, List, Any
 from pathlib import Path
 import numpy as np
 import pytest
@@ -127,13 +127,17 @@ def cpp_available() -> bool:
     except Exception:
         return False
 
-#!! TEMPORARY - remove later - just want to view the MCAP rather than throwing it away after the test
 @pytest.fixture
-def tmp_path() -> Path:
+def mcap_out_dir() -> Path:
     out_dir = Path("outputs")
     out_dir.mkdir(exist_ok=True)
     return out_dir
 
+@pytest.fixture
+def cfg_input_dir() -> Path:
+    input_dir = Path("tests/configs")
+    input_dir.mkdir(exist_ok=True)
+    return input_dir
 
 @pytest.fixture
 def sample_tick():
