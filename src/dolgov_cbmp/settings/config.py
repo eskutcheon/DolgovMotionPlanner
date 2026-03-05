@@ -1,18 +1,19 @@
-# src/settings/config.py
+# src/dolgov_cbmp/settings/config.py
 
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator #, model_validator
 
-from src.structs import GoalSpec, GridSpec, PlannerConfig, Pose, VehicleParams
+from dolgov_cbmp.structs import GoalSpec, GridSpec, PlannerConfig, Pose, VehicleParams
 
 
 class PlanningRunConfigModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
     backend: str = Field(default="python", pattern=r"^(python|cpp)$")
     max_expansions: int = Field(default=100_000, ge=1000, le=1_000_000)
+    world_cfg_path: Optional[str] = Field(default=None, pattern=r".*\.(yaml|yml|json|jsonl|pkl)$")
     planner: PlannerConfig #Model
     start: Pose #Model
     goal: GoalSpec #Model

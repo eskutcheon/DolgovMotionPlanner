@@ -10,24 +10,27 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-
+# add src to sys.path to import from the package for fixtures
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 @pytest.fixture
 def grid_spec():
-    from src.structs import GridSpec
+    from dolgov_cbmp.structs import GridSpec
     return GridSpec(resolution=1.0, theta_bins=36, origin_xy=(0.0, 0.0), kappa_bins=11)
 
 
 @pytest.fixture
 def vehicle_params():
-    from src.structs import VehicleParams
+    from dolgov_cbmp.structs import VehicleParams
     # defaults are fine for most tests
     return VehicleParams()
 
 
 @pytest.fixture
 def planner_config(grid_spec, vehicle_params):
-    from src.structs import PlannerConfig, HeuristicParams
+    from dolgov_cbmp.structs import PlannerConfig, HeuristicParams
     heuristics = HeuristicParams(
         # keep the nonholonomic table smaller for tests
         nh_table_xy_radius=8.0,
@@ -49,7 +52,7 @@ def planner_config(grid_spec, vehicle_params):
 
 @pytest.fixture
 def empty_grid(grid_spec):
-    from src.models.models import OccupancyGrid
+    from dolgov_cbmp.models.models import OccupancyGrid
     occ = np.zeros((60, 60), dtype=bool)
     return OccupancyGrid(occ, grid_spec)
 
@@ -57,7 +60,7 @@ def empty_grid(grid_spec):
 @pytest.fixture
 def grid_with_wall(grid_spec):
     """ A grid with a vertical wall and a gap. """
-    from src.models.models import OccupancyGrid
+    from dolgov_cbmp.models.models import OccupancyGrid
     occ = np.zeros((60, 60), dtype=bool)
     # Wall at x=30 with a gap at y in [28,32]
     occ[:, 30] = True
@@ -92,7 +95,7 @@ def hard_maze_file() -> Path:
 @pytest.fixture
 def maze_grid_and_poses(grid_spec, easy_maze_file: Path) -> Tuple[Any, List[float], List[float]]:
     """ A grid with predefined obstacles for deterministic tests """
-    from src.models.models import OccupancyGrid
+    from dolgov_cbmp.models.models import OccupancyGrid
     # maze_file = get_random_maze_file()
     maze_file = easy_maze_file
     # maze_file = hard_maze_file
@@ -103,26 +106,26 @@ def maze_grid_and_poses(grid_spec, easy_maze_file: Path) -> Tuple[Any, List[floa
 
 @pytest.fixture
 def start_pose():
-    from src.structs import Pose
+    from dolgov_cbmp.structs import Pose
     return Pose(5.0, 5.0, float(np.pi/2))
 
 
 @pytest.fixture
 def goal_pose():
-    from src.structs import Pose
+    from dolgov_cbmp.structs import Pose
     return Pose(50.0, 50.0, float(3*np.pi/2))
 
 
 @pytest.fixture
 def goal_spec(goal_pose):
-    from src.structs import GoalSpec
+    from dolgov_cbmp.structs import GoalSpec
     return GoalSpec(goal_pose, pos_tol=2.0, theta_tol=np.deg2rad(20.0))
 
 
 @pytest.fixture
 def cpp_available() -> bool:
     try:
-        from src.cpp_kernels import CPP_AVAILABLE
+        from dolgov_cbmp.cpp_kernels import CPP_AVAILABLE
         return bool(CPP_AVAILABLE)
     except Exception:
         return False
@@ -141,7 +144,7 @@ def cfg_input_dir() -> Path:
 
 @pytest.fixture
 def sample_tick():
-    from src.structs import PlannerTick, Pose
+    from dolgov_cbmp.structs import PlannerTick, Pose
     return PlannerTick(
         iteration=10,
         time_s=0.25,

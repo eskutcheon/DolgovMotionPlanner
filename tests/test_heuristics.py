@@ -4,9 +4,9 @@ import math
 
 import numpy as np
 
-from src.models import OccupancyGrid, HolonomicWithObstacles2D, NonHolonomicWithoutObstaclesTable
-from src.structs import GridSpec, PlannerConfig, VehicleParams, Pose
-from src.utils import compute_distance_to_obstacles_m, compute_gvd_distance_m
+from dolgov_cbmp.models import OccupancyGrid, HolonomicWithObstacles2D, NonHolonomicWithoutObstaclesTable
+from dolgov_cbmp.structs import GridSpec, PlannerConfig, VehicleParams, Pose
+from dolgov_cbmp.utils import compute_distance_to_obstacles_m, compute_gvd_distance_m
 
 
 def test_distance_to_obstacles_zero_on_obstacles():
@@ -33,7 +33,7 @@ def test_holonomic_heuristic_on_empty_grid_has_reasonable_values():
 
 
 def test_nonholonomic_table_zero_at_goal_and_euclidean_far():
-    from src.structs import HeuristicParams
+    from dolgov_cbmp.structs import HeuristicParams
     heuristics = HeuristicParams(
         # keep the nonholonomic table smaller for tests
         nh_table_xy_radius=6.0,
@@ -79,7 +79,7 @@ def test_compute_gvd_distance_from_occ():
 
 #& UPDATE: test to check that nonholonomic table respects the kappa bins override (important for preventing memory blow-up for high-res grids)
 def test_nonholonomic_table_respects_nh_kappa_bins_override():
-    from src.structs import HeuristicParams
+    from dolgov_cbmp.structs import HeuristicParams
     heuristics = HeuristicParams(
         nh_kappa_bins=5,
         nh_table_xy_radius=4.0,

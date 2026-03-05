@@ -1,4 +1,4 @@
-# src/models/refiner.py
+# src/dolgov_cbmp/models/refiner.py
 
 # Nonlinear optimization-based path smoothing (high-level flow)
 # -------------------------------------------------------------------------------------------------
@@ -15,8 +15,8 @@ import numpy as np
 from scipy.optimize import minimize
 # local module imports
 from .models import OccupancyGrid
-from src.structs import Pose, PathSmootherParams
-from src.utils import TAU, SQRT2, wrap_angle, pose_is_free
+from dolgov_cbmp.structs import Pose, PathSmootherParams
+from dolgov_cbmp.utils import TAU, SQRT2, wrap_angle, pose_is_free
 
 
 class PathRefiner:

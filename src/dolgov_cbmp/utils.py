@@ -1,10 +1,10 @@
-# src/utils.py
+# src/dolgov_cbmp/utils.py
 from typing import TYPE_CHECKING, Optional, Tuple, List
 import math
 import numpy as np
 
 if TYPE_CHECKING:
-    from src.models import OccupancyGrid
+    from dolgov_cbmp.models import OccupancyGrid
 
 
 TAU = 2.0 * math.pi

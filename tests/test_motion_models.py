@@ -1,8 +1,8 @@
 
 import math
 
-from src.models import BicycleModel
-from src.structs import Pose, VehicleParams
+from dolgov_cbmp.models import BicycleModel
+from dolgov_cbmp.structs import Pose, VehicleParams
 
 
 def test_bicycle_propagate_straight_line():

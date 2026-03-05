@@ -1,9 +1,9 @@
-# src/telemetry/telemetry.py
+# src/dolgov_cbmp/telemetry/telemetry.py
 from pathlib import Path
 import json
 from typing import Dict, Any, Iterable
 # local imports
-from src.structs import PlannerTick, Pose
+from dolgov_cbmp.structs import PlannerTick, Pose
 
 try:  # optional dependency
     from mcap.writer import Writer as McapWriter

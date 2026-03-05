@@ -1,12 +1,12 @@
-# src/models/heuristics.py
+# src/dolgov_cbmp/models/heuristics.py
 from typing import List, Dict, Optional, Tuple, Any
 import heapq
 import math
 import numpy as np
 
 from .models import OccupancyGrid #, BicycleModel
-from src.structs import Pose, PlannerConfig
-from src.utils import TAU, SQRT2, wrap_angle, kappa_to_bin, theta_to_bin
+from dolgov_cbmp.structs import Pose, PlannerConfig
+from dolgov_cbmp.utils import TAU, SQRT2, wrap_angle, kappa_to_bin, theta_to_bin
 
 
 

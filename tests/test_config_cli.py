@@ -1,8 +1,9 @@
+
 import math
 from pathlib import Path
 import pytest
-from src.settings import parse_planning_inputs #, PlanningRunConfigModel
-from src.structs import GridSpec, PlannerConfig, VehicleParams
+from dolgov_cbmp.settings import parse_planning_inputs #, PlanningRunConfigModel
+from dolgov_cbmp.structs import GridSpec, PlannerConfig, VehicleParams
 
 
 def test_planner_config_rejects_even_kappa_rate_samples():

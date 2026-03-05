@@ -79,6 +79,17 @@ python -m venv .env
   - Delete `build/` and any `*.so`/`*.pyd` artifacts (or reinstall in a fresh virtualenv), then rerun `python -m pip install -e .`.
 
 
+### CLI / module entry points
+
+After installation (`pip install -e .`), you can run:
+
+```bash
+python -m dolgov_cbmp --help
+dolgov_cbmp --help      # NOTE: may change this target name in the near future
+```
+
+Both entry points support YAML config files (`--config`) and dot-path overrides (`--set weights.reverse_penalty=2.0`).
+
 
 ### Creating new test grids from images of mazes
 
@@ -119,7 +130,7 @@ The physical vehicle parameters are included as the global constants below. Refe
 The Python planner loop now accepts an optional tick callback:
 
 ```python
-    from src.telemetry.telemetry import JsonlTickSink, McapTickSink
+    from dolgov_cbmp.telemetry.telemetry import JsonlTickSink, McapTickSink
 
     jsonl_sink = JsonlTickSink("artifacts/planner_ticks.jsonl")
     path, stats = planner.plan(start, goal, tick_callback=jsonl_sink, tick_stride=25)
@@ -135,7 +146,7 @@ Each emitted tick includes:
   - the current pose and the current best frontier pose
   - a reconstructed trajectory-to-current-node
 
-`src.telemetry.telemetry.tick_to_markers` converts each tick into marker-like payloads (`planner/current`, `planner/best`, `planner/trajectory`, `planner/explored`, `planner/collisions`).
+`dolgov_cbmp.telemetry.telemetry.tick_to_markers` converts each tick into marker-like payloads (`planner/current`, `planner/best`, `planner/trajectory`, `planner/explored`, `planner/collisions`).
 
 Use `McapTickSink` or the helper function `write_ticks_mcap` for direct MCAP generation, or `JsonlTickSink` for offline conversion workflows.
 

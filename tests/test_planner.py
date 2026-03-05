@@ -6,10 +6,10 @@ from dataclasses import replace
 import numpy as np
 import pytest
 # local module imports
-from src.structs import Pose, GoalSpec, GridSpec, PlannerConfig
-from src.models import OccupancyGrid
-from src.utils import pose_is_free, goal_reached
-from src.planners import planner_factory
+from dolgov_cbmp.structs import Pose, GoalSpec, GridSpec, PlannerConfig
+from dolgov_cbmp.models import OccupancyGrid
+from dolgov_cbmp.utils import pose_is_free, goal_reached
+from dolgov_cbmp.planners import planner_factory
 
 
 @pytest.mark.slow
@@ -27,7 +27,7 @@ def test_python_backend_finds_path_on_empty_map(empty_grid: OccupancyGrid, plann
 
 
 def test_python_backend_returns_empty_if_start_in_obstacle(grid_spec: GridSpec, planner_config: PlannerConfig, goal_spec: GoalSpec):
-    from src.models.models import OccupancyGrid
+    from dolgov_cbmp.models.models import OccupancyGrid
     occ = np.zeros((20, 20), dtype=bool)
     occ[5, 5] = True
     grid = OccupancyGrid(occ, grid_spec)
@@ -127,7 +127,7 @@ def test_path_smoothing_preserves_collision_free(empty_grid, planner_config):
 
 
 def test_adaptive_analytic_schedule_attempts_more_often_near_goal(empty_grid, planner_config):
-    from src.structs import AnalyticScheduleParams
+    from dolgov_cbmp.structs import AnalyticScheduleParams
     cfg = planner_config
     cfg = replace(
         cfg,
@@ -150,7 +150,7 @@ def test_adaptive_analytic_schedule_attempts_more_often_near_goal(empty_grid, pl
 
 
 def test_objective_smoother_anchors_colliding_points(grid_with_wall: OccupancyGrid, planner_config: PlannerConfig):
-    from src.structs import PathSmootherParams
+    from dolgov_cbmp.structs import PathSmootherParams
     cfg = replace(
         planner_config,
         smoother=PathSmootherParams(use_objective_smoother=True, smoothing_anchor_rounds=2, objective_smoothing_iters=3),
@@ -173,7 +173,7 @@ def test_objective_smoother_anchors_colliding_points(grid_with_wall: OccupancyGr
 
 
 def test_curvature_aware_step_policy_reduces_step_at_high_kappa(empty_grid, planner_config):
-    from src.structs import StepPolicyParams
+    from dolgov_cbmp.structs import StepPolicyParams
     cfg: PlannerConfig = replace(
         planner_config,
         step_policy=StepPolicyParams(use_variable_step=True, step_size_max=10.0, variable_step_beta=0.2, curvature_slowdown_gain=3.0)
@@ -187,7 +187,7 @@ def test_curvature_aware_step_policy_reduces_step_at_high_kappa(empty_grid, plan
 
 
 def test_refiner_objective_includes_voronoi_weight(empty_grid, planner_config):
-    from src.structs import PathSmootherParams
+    from dolgov_cbmp.structs import PathSmootherParams
     cfg = replace(planner_config, smoother=PathSmootherParams(use_objective_smoother=True, objective_w_voronoi=0.7, objective_smoothing_iters=1))
     planner = planner_factory(empty_grid, cfg, backend="python")
     xy = np.array([[5.0, 5.0], [6.0, 5.0], [7.0, 5.0], [8.0, 5.0], [9.0, 5.0]], dtype=np.float64)

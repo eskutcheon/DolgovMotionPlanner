@@ -1,13 +1,13 @@
-# src/planners/planner_base.py
+# src/dolgov_cbmp/planners/planner_base.py
 
 from typing import List, Optional, Tuple, TypeAlias, Callable
 import heapq
 import time
 import numpy as np
 # local module imports
-from src.structs import Pose, GoalSpec, PlannerStats, HybridNode, PlannerConfig, PlannerTick
-from src.models import *
-from src.utils import (
+from dolgov_cbmp.structs import Pose, GoalSpec, PlannerStats, HybridNode, PlannerConfig, PlannerTick
+from dolgov_cbmp.models import *
+from dolgov_cbmp.utils import (
     SQRT2, wrap_angle, pose_is_free, compute_distance_to_obstacles_m, make_rectangle_footprint_offsets,
     rectangle_circumscribed_radius, build_orientation_binned_footprint_cache, compute_gvd_distance_m
 )

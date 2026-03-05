@@ -1,4 +1,4 @@
-# src/planners/__init__.py
+# src/dolgov_cbmp/planners/__init__.py
 
 from .planners import planner_factory
 

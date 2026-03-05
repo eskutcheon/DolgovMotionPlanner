@@ -1,6 +1,8 @@
-# src/structs.py
+# src/dolgov_cbmp/structs.py
+
+from pathlib import Path
 from dataclasses import asdict, field #, dataclass
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Union
 import math
 from pydantic import ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
@@ -28,8 +30,6 @@ class GoalSpec:
     pose: Pose
     pos_tol: float = Field(default=0.5, ge=0.0, le=10.0)      # meters
     theta_tol: float = Field(default=math.radians(15.0), ge=0.0, le=math.pi)
-    #& UPDATE: removed use of kappa tolerance everywhere since it complicates goal checking and isn't found in similar literature
-    # kappa_tol: float = 0.1    # 1/meters
 
 
 @dataclass(frozen=True, slots=True, config=ConfigDict(validate_assignment=True))
@@ -37,6 +37,9 @@ class GridSpec:
     """ occupancy grid discretization parameters - grid shape inferred from occupancy array shape """
     #? NOTE: resolution performance tradeoff: too small -> explodes runtime, too large -> jagged paths and failure in tight spaces
     resolution: float = Field(default=1.0, gt=0.0, le=5.0)  # meters per cell
+    # TODO: honestly really need to add the grid shape here, but it requires refactoring how and when we create these and the OccupancyGrid together
+        # - taking OccupancyGrid, start/goal Pose, and GridSpec together in WorldConfig object and extricate GridSpec from PlannerConfig, it simplifies things
+        # - could also validate that grid spec is always properly aligned with the occupancy grid and the start/goal poses are within bounds
     #? NOTE: theta_bins performance tradeoff: too low -> snapping behavior and failure in tight spaces,  too high -> explodes runtime and memory (from hashed state keys)
     theta_bins: int = Field(default=36, ge=4, le=720)       # number of discretized headings
     origin_xy: Tuple[float, float] = (0.0, 0.0)             # world origin of grid [m]
@@ -80,6 +83,10 @@ class HybridNode:
     parent_action: Tuple[int, float] = (1, 0.0)  # (direction bit, curvature delta)
 
 
+# ---------------------------------------------------------
+# Planner tick logging (for benchmarking & later MCAP)
+# ---------------------------------------------------------
+
 @dataclass(slots=True)
 class PlannerStats:
     expanded: int = 0
@@ -99,10 +106,6 @@ class PlannerStats:
     def elapsed_s(self) -> float:
         return self.end_time_s - self.start_time_s if self.end_time_s > self.start_time_s else 0.0
 
-
-# ---------------------------------------------------------
-# Planner tick logging (for benchmarking & later MCAP)
-# ---------------------------------------------------------
 
 @dataclass(slots=True)
 class PlannerTick:
@@ -283,6 +286,15 @@ class PlannerConfig:
     vehicle: VehicleParams
     weights: PlannerWeights = field(default_factory=PlannerWeights)
     heuristics: HeuristicParams = field(default_factory=HeuristicParams)
+    analytic: AnalyticScheduleParams = field(default_factory=AnalyticScheduleParams)
+    step_policy: StepPolicyParams = field(default_factory=StepPolicyParams)
+    # bounded analytic connector (beam search over curvature-rate actions)
+    #! FIXME: setting to False always fails except when using beam search, nonholonomic heuristic enabled, and with high dense_g threshold
+    use_analytic_connector: bool = True
+    connector: ConnectorParams = field(default_factory=ConnectorParams)
+    use_path_smoothing: bool = True # knob for post-search path smoothing
+    smoother: PathSmootherParams = field(default_factory=PathSmootherParams)
+    world_cfg_path: Optional[Union[str, Path]] = Field(default=None, pattern=r".*\.(yaml|yml|json|jsonl|pkl)$")
     # voronoi: VoronoiParams = field(default_factory=VoronoiParams)
     voronoi_alpha: float = Field(default=1.0, ge=0.0, le=100.0)
     voronoi_dO_max: float = Field(default=5.0, ge=0.0, le=1000.0)
@@ -292,27 +304,21 @@ class PlannerConfig:
     #? NOTE: kappa_rate_samples is the branching factor - 3: decent, 5: much slower, 7: often terrible slowdown
     kappa_rate_samples: int = Field(default=3, ge=1, le=101) # curvature-rate control samples $u = d\kappa/ds$. Typically 3: [-u_max, 0, +u_max]
     allow_reverse: bool = True
-    analytic: AnalyticScheduleParams = field(default_factory=AnalyticScheduleParams)
     # rectangle collision sampling in vehicle frame; if None, planners choose a default based on grid resolution
     footprint_sample_step: Optional[float] = Field(default=None, gt=0.0, le=10.0)
     kappa_max: float = Field(default=0.2, ge=0.0, le=2.0)                  # max curvature $|\kappa|$ (1/meters)
     #? NOTE: kappa_rate_max being too low may lead to more aggressive curvature changes
     kappa_rate_max: float = Field(default=0.1, ge=0.0, le=2.0)            # max curvature change per step - $|u| = |\frac{d\kappa}{ds}|$ (1/m^2)
-    step_policy: StepPolicyParams = field(default_factory=StepPolicyParams)
     #? NOTE: too low -> use sparse dict w/ slower lookup but lower memory, too high -> may allocate enormous arrays and thrash RAM (slow anyway)
     dense_best_g_max_states: int = Field(default=10_000_000, ge=100, le=100_000_000)   # large-grid support - avoids dense best_g if the full 4D lattice is too large
     # open-list tie break - when f is equal, prefer deeper nodes (larger g)
     prefer_larger_g_tiebreak: bool = True
-    # bounded analytic connector (beam search over curvature-rate actions)
-    #! FIXME: setting to False always fails except when using beam search, nonholonomic heuristic enabled, and with high dense_g threshold
-    use_analytic_connector: bool = True
-    connector: ConnectorParams = field(default_factory=ConnectorParams)
-    use_path_smoothing: bool = True # knob for post-search path smoothing
-    smoother: PathSmootherParams = field(default_factory=PathSmootherParams)
 
 
     @model_validator(mode="after")
     def _validate_cross_parameters(self) -> "PlannerConfig":
+        if self.world_cfg_path is not None and not Path(self.world_cfg_path).is_file():
+            raise ValueError(f"world_cfg_path {self.world_cfg_path} does not exist or is not a file")
         #! TEMPORARY - enforce kappa_max consistency - eventually want to use a single source of truth, but I'll be refactoring a bunch for pydantic later anyway
         if self.kappa_max != self.grid.kappa_max:
             object.__setattr__(self, "kappa_max", self.grid.kappa_max)

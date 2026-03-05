@@ -7,8 +7,8 @@ import pytest
 import math
 from typing import List, Tuple, Any
 # local imports
-from src.structs import PlannerTick, Pose, GoalSpec, PlannerConfig
-from src.utils import goal_reached
+from dolgov_cbmp.structs import PlannerTick, Pose, GoalSpec, PlannerConfig
+from dolgov_cbmp.utils import goal_reached
 
 
 
@@ -40,7 +40,7 @@ def _read_mcap_by_topic(path):
 
 
 def test_tick_to_markers_includes_trajectory_and_collision_points(sample_tick: PlannerTick):
-    from src.telemetry import tick_to_markers
+    from dolgov_cbmp.telemetry import tick_to_markers
     payload = tick_to_markers(sample_tick)
     assert payload["tick"]["iteration"] == 10
     assert len(payload["markers"]) == 7
@@ -54,7 +54,7 @@ def test_tick_to_markers_includes_trajectory_and_collision_points(sample_tick: P
 
 def test_tick_write_mcap(mcap_out_dir: Path, sample_tick: PlannerTick):
     pytest.importorskip("mcap")
-    from src.telemetry import write_ticks_mcap
+    from dolgov_cbmp.telemetry import write_ticks_mcap
     pytest.importorskip("mcap")
     out = mcap_out_dir / "ticks.mcap"
     write_ticks_mcap([sample_tick], out)
@@ -66,7 +66,7 @@ def test_tick_write_mcap(mcap_out_dir: Path, sample_tick: PlannerTick):
 
 def test_tick_write_mcap_roundtrip_json(mcap_out_dir: Path, sample_tick):
     pytest.importorskip("mcap")
-    from src.telemetry import write_ticks_mcap
+    from dolgov_cbmp.telemetry import write_ticks_mcap
     # spoof some ticks with different iterations for testing
     ticks = [
         sample_tick,
@@ -91,7 +91,7 @@ def test_tick_write_mcap_roundtrip_json(mcap_out_dir: Path, sample_tick):
 
 def test_tick_write_mcap_ns_time(mcap_out_dir: Path, sample_tick):
     pytest.importorskip("mcap")
-    from src.telemetry import write_ticks_mcap
+    from dolgov_cbmp.telemetry import write_ticks_mcap
     ticks = [
         replace(sample_tick, time_s=0.25),
         replace(sample_tick, time_s=1.00),
@@ -108,7 +108,7 @@ def test_tick_write_mcap_ns_time(mcap_out_dir: Path, sample_tick):
 
 
 def test_tick_write_jsonl_lines(mcap_out_dir: Path, sample_tick):
-    from src.telemetry import write_ticks_jsonl
+    from dolgov_cbmp.telemetry import write_ticks_jsonl
     ticks = [
         sample_tick,
         replace(sample_tick, iteration=11, time_s=0.30, expanded=11),
@@ -126,7 +126,7 @@ def test_tick_write_jsonl_lines(mcap_out_dir: Path, sample_tick):
 def test_tick_foxglove_mcap_topics(mcap_out_dir, sample_tick):
     """ test that the Foxglove MCAP writer publishes to expected topics, with expected encodings and payload structure """
     pytest.importorskip("foxglove")
-    from src.telemetry import write_ticks_mcap_foxglove as write_fg_mcap
+    from dolgov_cbmp.telemetry import write_ticks_mcap_foxglove as write_fg_mcap
     ticks = [
         sample_tick,
         replace(sample_tick, iteration=11, time_s=0.30, expanded=11),
@@ -152,7 +152,7 @@ def test_tick_foxglove_mcap_topics(mcap_out_dir, sample_tick):
 
 @pytest.mark.slow
 def test_tick_planner_logs_and_writes_mcap(mcap_out_dir, empty_grid, planner_config):
-    from src.planners import planner_factory
+    from dolgov_cbmp.planners import planner_factory
     # tick_callback is only supported in the python backend in your code today
     planner = planner_factory(empty_grid, planner_config, backend="python")
     # TODO: might replace with conftest fixtures later
@@ -178,11 +178,11 @@ def test_tick_planner_logs_and_writes_mcap(mcap_out_dir, empty_grid, planner_con
     assert len(ticks) > 2  # "several" ticks
     pytest.importorskip("mcap")
     from mcap.reader import make_reader
-    from src.telemetry import write_ticks_mcap as write_raw_mcap
+    from dolgov_cbmp.telemetry import write_ticks_mcap as write_raw_mcap
     raw_path = mcap_out_dir / f"sim_raw_{uuid4().hex}.mcap"
     write_raw_mcap(ticks, raw_path)
     pytest.importorskip("foxglove")
-    from src.telemetry import write_ticks_mcap_foxglove
+    from dolgov_cbmp.telemetry import write_ticks_mcap_foxglove
     fg_path = mcap_out_dir / f"sim_fg_{uuid4().hex}.mcap"
     write_ticks_mcap_foxglove(ticks, fg_path)
     # check that both files are readable, i.e. have the magic header and at least one message
@@ -202,7 +202,7 @@ def test_tick_planner_logs_mazes_and_writes_mcap(
     goal_spec: GoalSpec,
     require_success: bool = True,
 ):
-    from src.planners import planner_factory
+    from dolgov_cbmp.planners import planner_factory
     grid, start, goal = maze_grid_and_poses
     # update start and goal poses with those from the maze file (necessary since Pose dataclasses are frozen)
     s_pose = Pose(start[0], start[1], start_pose.theta, start_pose.kappa)
@@ -230,7 +230,7 @@ def test_tick_planner_logs_mazes_and_writes_mcap(
     pytest.importorskip("mcap")
     from mcap.reader import make_reader
     pytest.importorskip("foxglove")
-    from src.telemetry import write_ticks_mcap_foxglove
+    from dolgov_cbmp.telemetry import write_ticks_mcap_foxglove
     fg_path = mcap_out_dir / f"full_sim_fg_{uuid4().hex}.mcap"
     write_ticks_mcap_foxglove(ticks, fg_path, occ_grid=grid, start_pose=s_pose, goal=g_spec, vehicle=planner_config.vehicle)
     # check that both files are readable, i.e. have the magic header and at least one message

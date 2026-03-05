@@ -1,4 +1,4 @@
-# src/models/reeds_shepp.py
+# src/dolgov_cbmp/models/reeds_shepp.py
 
 """ Reeds-Shepp / Dubins-style local connectors for Hybrid A* analytic expansions
     - optional module (for now) without hard dependencies on external RS libraries
@@ -14,8 +14,8 @@ import heapq
 import math
 import numpy as np
 # local imports
-from src.structs import Pose
-from src.utils import wrap_angle
+from dolgov_cbmp.structs import Pose
+from dolgov_cbmp.utils import wrap_angle
 
 
 def reeds_shepp_shot(

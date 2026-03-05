@@ -14,10 +14,10 @@
 # import math
 import numpy as np
 # local module imports
-# from src.structs import GridSpec, VehicleParams, Pose, GoalSpec, PlannerConfig
-from src.settings import parse_planning_inputs
-from src.models import OccupancyGrid
-from src.planners import planner_factory
+# from dolgov_cbmp.structs import GridSpec, VehicleParams, Pose, GoalSpec, PlannerConfig
+from dolgov_cbmp.settings import parse_planning_inputs
+from dolgov_cbmp.models import OccupancyGrid
+from dolgov_cbmp.planners import planner_factory
 
 
 
@@ -27,12 +27,8 @@ def plan_example() -> None:
     occ = np.zeros((200, 200), dtype=bool)
     occ[80:120, 100] = True
     og = OccupancyGrid(occ, args.planner_config.grid)
-    print("grid created:", args.planner_config.grid)
-    # print("planner config:", args.planner_config)
-    print("start:", args.start)
-    print("goal:", args.goal)
+
     planner = planner_factory(og, args.planner_config, backend=args.backend)
-    print("planner created with backend:", args.backend)
     path, stats = planner.plan(args.start, args.goal, max_expansions=args.max_expansions)
     print("planning completed.")
     print(

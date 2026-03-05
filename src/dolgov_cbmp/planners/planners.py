@@ -1,15 +1,15 @@
-# src/planners/planners.py
+# src/dolgov_cbmp/planners/planners.py
 from typing import List, Optional, Tuple, Literal, Dict
 import heapq
 import time
 import numpy as np
 # local module imports
-from src.structs import Pose, GoalSpec, PlannerStats, HybridNode, PlannerConfig, DiscreteKey
-from src.models import *
-from src.planners.planner_base import HybridAStarPlannerBase, PlannerEventStream, TickCallback
+from dolgov_cbmp.structs import Pose, GoalSpec, PlannerStats, HybridNode, PlannerConfig, DiscreteKey
+from dolgov_cbmp.models import *
+from dolgov_cbmp.planners.planner_base import HybridAStarPlannerBase, PlannerEventStream, TickCallback
 
 try:
-    from src.cpp_kernels import run_search_cpp, CPP_AVAILABLE
+    from dolgov_cbmp.cpp_kernels import run_search_cpp, CPP_AVAILABLE
 except Exception:  # pragma: no cover
     CPP_AVAILABLE = False
     run_search_cpp = None  # type: ignore

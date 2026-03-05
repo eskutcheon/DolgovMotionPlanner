@@ -1,13 +1,13 @@
-# src/telemetry/foxglove.py
+# src/dolgov_cbmp/telemetry/foxglove.py
 from pathlib import Path
 import math
 import struct
 from dataclasses import dataclass, field #, asdict
 from typing import Iterable, Sequence, Tuple, Optional, List, TypeAlias, Dict
 # local imports
-from src.structs import PlannerTick, Pose, GoalSpec, VehicleParams
-from src.models.models import OccupancyGrid
-from src.utils import get_occupied_rectangles
+from dolgov_cbmp.structs import PlannerTick, Pose, GoalSpec, VehicleParams
+from dolgov_cbmp.models.models import OccupancyGrid
+from dolgov_cbmp.utils import get_occupied_rectangles
 
 try:
     import foxglove

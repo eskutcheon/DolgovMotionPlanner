@@ -1,4 +1,4 @@
-# src/settings/cli.py
+# src/dolgov_cbmp/settings/cli.py
 
 import argparse
 import copy
@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Sequence, Optional, List, Dict
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.settings.config import (
+from dolgov_cbmp.settings.config import (
     DotPathOverride,
     PlanningRunConfigModel,
     apply_dotted_override,
@@ -15,7 +15,7 @@ from src.settings.config import (
     default_planner_config_dict,
     load_yaml_dict,
 )
-from src.structs import GoalSpec, PlannerConfig, Pose
+from dolgov_cbmp.structs import GoalSpec, PlannerConfig, Pose
 
 WHOLE_PI = 3.14159265 #35897932384626433832795028841971693993751058209749445923
 HALF_PI = 1.57079632 #67948966192313216916397514420985846996875529104874722961
@@ -27,6 +27,10 @@ class CLIOverridesModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
     backend: str = Field(default="python", pattern=r"^(python|cpp)$")
     max_expansions: int = Field(default=100_000, ge=1, le=1_000_000)
+    # TODO: need to change the precedence and conditional dependence of other arguments with this
+    #   e.g., don't require start, goal, or grid spec if world_cfg_path is provided
+    #   also need some conditional logic in the OccupancyGrid loading and instantiation for a full grid
+    world_cfg_path: Optional[str] = Field(default=None, pattern=r".*\.(yaml|yml|json|jsonl|pkl)$")
     config_file: Optional[str] = None
     start_x: float = 5.0
     start_y: float = 5.0
@@ -45,6 +49,7 @@ class CLIOverridesModel(BaseModel):
 class PlanningInputs:
     backend: str
     max_expansions: int
+    world_cfg_path: Optional[str]
     planner_config: PlannerConfig
     start: Pose
     goal: GoalSpec
@@ -57,8 +62,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     # TODO: might just want to support this via --opts (can't remember if this is supported in argparse or just jsonargparse where I used it before)
     parser.add_argument("--config", dest="config_file", help="Path to YAML config file")
+    # TODO: add some arguments to provide the occupancy grid in various formats (not just .npz)
+        # primarily support pkl, hdf5, json/jsonl, onnx, etc.
     parser.add_argument("--backend", choices=("python", "cpp"), default="python")
     parser.add_argument("--max-expansions", type=int, default=100_000)
+    parser.add_argument("--world-cfg", dest="world_cfg_path", help="Path to world config file (YAML/JSON/PKL) that can override planner config values and provide map data")
     # start pose
     parser.add_argument("--start.x", dest="start_x", type=float, default=5.0)
     parser.add_argument("--start.y", dest="start_y", type=float, default=5.0)
@@ -109,6 +117,7 @@ def parse_planning_inputs(argv: Optional[Sequence[str]] = None) -> PlanningInput
         backend=parsed.backend,
         max_expansions=parsed.max_expansions,
         config_file=parsed.config_file,
+        world_cfg_path=parsed.world_cfg_path,
         start_x=parsed.start_x,
         start_y=parsed.start_y,
         start_theta=parsed.start_theta,
@@ -134,6 +143,7 @@ def parse_planning_inputs(argv: Optional[Sequence[str]] = None) -> PlanningInput
     run_payload: dict[str, Any] = {
         "backend": cli.backend,
         "max_expansions": cli.max_expansions,
+        "world_cfg_path": cli.world_cfg_path,
         "planner": planner_dict,
         "start": {
             "x": cli.start_x,
@@ -159,6 +169,7 @@ def parse_planning_inputs(argv: Optional[Sequence[str]] = None) -> PlanningInput
     return PlanningInputs(
         backend=run_model.backend,
         max_expansions=run_model.max_expansions,
+        world_cfg_path=run_model.world_cfg_path,
         planner_config=run_model.planner,
         start=run_model.start,
         goal=run_model.goal,

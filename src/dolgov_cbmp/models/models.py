@@ -1,12 +1,12 @@
-# src/models/models.py
+# src/dolgov_cbmp/models/models.py
 from typing import List, Optional, Tuple, Sequence, Dict
 import math
 import numpy as np
 np.set_printoptions(precision=3, suppress=True, threshold=100000)
 from pathlib import Path
 
-from src.structs import GridSpec, VehicleParams, Pose, DiscreteKey
-from src.utils import TAU, wrap_angle, pose_is_free, pose_is_free_cached_cells, kappa_to_bin, theta_to_bin
+from dolgov_cbmp.structs import GridSpec, VehicleParams, Pose, DiscreteKey
+from dolgov_cbmp.utils import TAU, wrap_angle, pose_is_free, pose_is_free_cached_cells, kappa_to_bin, theta_to_bin
 
 
 
