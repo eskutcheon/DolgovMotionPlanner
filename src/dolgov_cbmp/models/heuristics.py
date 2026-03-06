@@ -4,7 +4,7 @@ import heapq
 import math
 import numpy as np
 
-from .models import OccupancyGrid #, BicycleModel
+from dolgov_cbmp.models import OccupancyGrid #, BicycleModel
 from dolgov_cbmp.structs import Pose, PlannerConfig
 from dolgov_cbmp.utils import TAU, SQRT2, wrap_angle, kappa_to_bin, theta_to_bin
 
@@ -247,7 +247,7 @@ class NonHolonomicWithoutObstaclesTable:
         theta_bins = int(round(TAU / dth))
         dth = TAU / float(theta_bins)
         # kappa_bins = int(self.cfg.heuristics.nh_kappa_bins or self.cfg.grid.kappa_bins)
-        kappa_max = float(self.cfg.kappa_max)
+        kappa_max = float(self.cfg.curvature.kappa_max)
         use_kappa_dim = self.cfg.heuristics.nh_kappa_bins is not None
         # model = BicycleModel(self.cfg.vehicle)
         # Goal at center cell, theta=0
@@ -306,12 +306,11 @@ class NonHolonomicWithoutObstaclesTable:
 
 
     def _action_set(self, use_kappa_dim: bool = False) -> np.ndarray:
-        #? NOTE: not sure if I should also be using kappa_rate_max for the curvature-aware table (which currently uses cfg.kappa_max)
         if use_kappa_dim:
-            kappa_max = float(self.cfg.kappa_max)
+            kappa_max = float(self.cfg.curvature.kappa_max)
             return np.array([-kappa_max, 0.0, kappa_max], dtype=np.float64)
-        m = int(self.cfg.kappa_rate_samples)
-        u_max = float(self.cfg.kappa_rate_max)
+        m = int(self.cfg.curvature.kappa_rate_samples)
+        u_max = float(self.cfg.curvature.kappa_rate_max)
         if m <= 1:
             return np.array([0.0])
         # return symmetric samples including 0

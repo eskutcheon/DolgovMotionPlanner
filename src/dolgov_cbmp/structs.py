@@ -1,8 +1,7 @@
 # src/dolgov_cbmp/structs.py
 
-from pathlib import Path
 from dataclasses import asdict, field #, dataclass
-from typing import Optional, Tuple, List, Union
+from typing import Optional, Tuple, List, Union, Any
 import math
 from pydantic import ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
@@ -43,13 +42,31 @@ class GridSpec:
     #? NOTE: theta_bins performance tradeoff: too low -> snapping behavior and failure in tight spaces,  too high -> explodes runtime and memory (from hashed state keys)
     theta_bins: int = Field(default=36, ge=4, le=720)       # number of discretized headings
     origin_xy: Tuple[float, float] = (0.0, 0.0)             # world origin of grid [m]
+    #!!!! FIXCHANGE: remove these in favor of only using the CurvatureParams
     #? NOTE: kappa_bins performance tradeoff: too low -> worse curvature handling, too high -> explodes runtime and memory
     kappa_bins: int = Field(default=11, ge=1, le=101)       # (grid curvature resolution) number of discrete curvature values
-    kappa_max: float = Field(default=0.2, ge=0.0, le=2.0)   # max curvature (1/meters)
+    # kappa_max: float = Field(default=0.2, ge=0.0, le=2.0)   # max curvature (1/meters)
 
     def to_dict(self):
         return asdict(self)
 
+
+@dataclass(frozen=True, slots=True, config=ConfigDict(arbitrary_types_allowed=True))
+class WorldModel:
+    """ runtime world state passed around planner entry points - also meant to be constructed by data loaded from `world_cfg_path` later """
+    occupancy_grid: Any
+    start: Pose
+    goal: GoalSpec
+    vehicle: Optional["VehicleParams"] = None
+
+    @property
+    def grid(self) -> GridSpec:
+        return self.occupancy_grid.grid
+
+    def validate(self) -> None:
+        s_ix, s_iy = self.occupancy_grid.world_to_grid(self.start.x, self.start.y)
+        g_ix, g_iy = self.occupancy_grid.world_to_grid(self.goal.pose.x, self.goal.pose.y)
+        self.occupancy_grid._sanity_check_poses(s_ix, s_iy, g_ix, g_iy, "maps to out-of-bounds or occupied cell")
 
 # Could move more methods from the Indexer class to this struct and make it more of a "DiscreteState" class that
 #   encapsulates the discrete key and any relevant methods for hashing, neighbor generation, etc
@@ -175,14 +192,11 @@ class PlannerWeights:
     voronoi_weight: float = Field(default=0.5, ge=0.0, le=10.0)  # keeping it at 1.0 for initial regression testing (to keep same weight as before)
     # curvature-rate penalty (encourages smooth steering evolution without instantaneous jumps)
     #? NOTE: kappa_rate_weight performance tradeoff: too low -> steering jerks, too high -> refusal to make any real steering changes
-    kappa_rate_weight: float = Field(default=0.05, ge=0.0, le=10.0)              # weight on $\int u^2 ds$ (for curvature change in the cost function)
+    kappa_rate_weight: float = Field(default=0.05, ge=0.0, le=10.0)           # weight on $\int u^2 ds$ (for curvature change in the cost function)
     #? NOTE: kappa_rate_change_weight := the anti-oscillation weight - if under-weighted, paths tend to show oscillatory behavior
-    kappa_rate_change_weight: float = Field(default=0.5, ge=0.0, le=10.0)        # weight on $|u - u_prev|$ (optional extra smoothing)
+    kappa_rate_change_weight: float = Field(default=0.5, ge=0.0, le=10.0)     # weight on $|u - u_prev|$ (optional extra smoothing)
+    score_heuristic_weight: float = Field(default=0.1, ge=0.0, le=1.0)        # weight on heuristic score for computing the terminal score with the goal tolerances
 
-# @dataclass(frozen=True, slots=True)
-# class VoronoiParams:
-#     alpha: float = 1.0
-#     dO_max: float = 5.0
 
 @dataclass(frozen=True, slots=True, config=ConfigDict(validate_assignment=True))
 class ConnectorParams:
@@ -278,6 +292,28 @@ class HeuristicParams:
     h2d_min_clearance_m: float = Field(default=0.0, ge=0.0, le=100.0)    # HARD prune threshold based on dO (meters) - 0.0 avoids motion degeneracy in tight maps
     h2d_soft_clearance_m: float = Field(default=0.0, ge=0.0, le=100.0)   # OPTIONAL: soft bias away from obstacles in the 2D DP (no pruning)
     h2d_soft_clearance_weight: float = Field(default=0.0, ge=0.0, le=100.0)
+    #& UPDATE: moved Voronoi parameters here for better organization
+    voronoi_alpha: float = Field(default=1.0, ge=0.0, le=100.0)
+    voronoi_dO_max: float = Field(default=5.0, ge=0.0, le=1000.0)
+
+
+@dataclass(frozen=True, slots=True, config=ConfigDict(validate_assignment=True))
+class CurvatureParams:
+    """ curvature discretization and steering-rate constraints owned by the planner
+        - affects both the search space and the analytic connector when using curvature-rate control
+    """
+    # kappa_bins: int = Field(default=11, ge=1, le=101) # needs validation if left in
+    kappa_max: float = Field(default=0.2, ge=0.0, le=2.0)   # max curvature $|\kappa|$ (1/meters)
+    #? NOTE: kappa_rate_max being too low may lead to more aggressive curvature changes
+    kappa_rate_max: float = Field(default=0.1, ge=0.0, le=2.0) # max curvature change per step - $|u| = |\frac{d\kappa}{ds}|$ (1/m^2)
+    #? NOTE: kappa_rate_samples is the branching factor - 3: decent, 5: much slower, 7: often terrible slowdown
+    kappa_rate_samples: int = Field(default=3, ge=1, le=101) # curvature-rate control samples $u = d\kappa/ds$. Typically 3: [-u_max, 0, +u_max]
+
+    @model_validator(mode="after")
+    def _validate_samples(self) -> "CurvatureParams":
+        if self.kappa_rate_samples % 2 == 0:
+            raise ValueError("curvature.kappa_rate_samples should be odd to include a straight control")
+        return self
 
 
 @dataclass(frozen=True, slots=True, config=ConfigDict(validate_assignment=True))
@@ -290,25 +326,19 @@ class PlannerConfig:
     step_policy: StepPolicyParams = field(default_factory=StepPolicyParams)
     # bounded analytic connector (beam search over curvature-rate actions)
     #! FIXME: setting to False always fails except when using beam search, nonholonomic heuristic enabled, and with high dense_g threshold
+    #   TODO: make an issue for this later
     use_analytic_connector: bool = True
     connector: ConnectorParams = field(default_factory=ConnectorParams)
     use_path_smoothing: bool = True # knob for post-search path smoothing
     smoother: PathSmootherParams = field(default_factory=PathSmootherParams)
-    world_cfg_path: Optional[Union[str, Path]] = Field(default=None, pattern=r".*\.(yaml|yml|json|jsonl|pkl)$")
-    # voronoi: VoronoiParams = field(default_factory=VoronoiParams)
-    voronoi_alpha: float = Field(default=1.0, ge=0.0, le=100.0)
-    voronoi_dO_max: float = Field(default=5.0, ge=0.0, le=1000.0)
+    curvature: CurvatureParams = field(default_factory=CurvatureParams)
+    # world_cfg_path: Optional[Union[str, Path]] = Field(default=None, pattern=r".*\.(yaml|yml|json|jsonl|pkl|npz|hdf5)$")
     step_size: float = Field(default=1.0, gt=0.0, le=50.0)      # propagation distance per expansion [m] - should be a multiple of the grid resolution
     #? NOTE: n_substeps is a major performance knob - more substeps means better edge collision detection but more expensive edge checks
     n_substeps: int = Field(default=5, ge=1, le=100)         # collision sampling along edge - increase to address failing narrow paths - if 1, only check at the endpoint
-    #? NOTE: kappa_rate_samples is the branching factor - 3: decent, 5: much slower, 7: often terrible slowdown
-    kappa_rate_samples: int = Field(default=3, ge=1, le=101) # curvature-rate control samples $u = d\kappa/ds$. Typically 3: [-u_max, 0, +u_max]
     allow_reverse: bool = True
     # rectangle collision sampling in vehicle frame; if None, planners choose a default based on grid resolution
     footprint_sample_step: Optional[float] = Field(default=None, gt=0.0, le=10.0)
-    kappa_max: float = Field(default=0.2, ge=0.0, le=2.0)                  # max curvature $|\kappa|$ (1/meters)
-    #? NOTE: kappa_rate_max being too low may lead to more aggressive curvature changes
-    kappa_rate_max: float = Field(default=0.1, ge=0.0, le=2.0)            # max curvature change per step - $|u| = |\frac{d\kappa}{ds}|$ (1/m^2)
     #? NOTE: too low -> use sparse dict w/ slower lookup but lower memory, too high -> may allocate enormous arrays and thrash RAM (slow anyway)
     dense_best_g_max_states: int = Field(default=10_000_000, ge=100, le=100_000_000)   # large-grid support - avoids dense best_g if the full 4D lattice is too large
     # open-list tie break - when f is equal, prefer deeper nodes (larger g)
@@ -317,13 +347,8 @@ class PlannerConfig:
 
     @model_validator(mode="after")
     def _validate_cross_parameters(self) -> "PlannerConfig":
-        if self.world_cfg_path is not None and not Path(self.world_cfg_path).is_file():
-            raise ValueError(f"world_cfg_path {self.world_cfg_path} does not exist or is not a file")
-        #! TEMPORARY - enforce kappa_max consistency - eventually want to use a single source of truth, but I'll be refactoring a bunch for pydantic later anyway
-        if self.kappa_max != self.grid.kappa_max:
-            object.__setattr__(self, "kappa_max", self.grid.kappa_max)
+        # if self.world_cfg_path is not None and not Path(self.world_cfg_path).is_file():
+        #     raise ValueError(f"world_cfg_path {self.world_cfg_path} does not exist or is not a file")
         if self.step_policy.step_size_max < self.step_size:
             raise ValueError("step_policy.step_size_max must be >= step_size")
-        if self.kappa_rate_samples % 2 == 0:
-            raise ValueError("kappa_rate_samples should be odd to include a straight control")
         return self

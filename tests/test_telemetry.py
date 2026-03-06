@@ -1,3 +1,4 @@
+# tests/test_telemetry.py
 import json
 from dataclasses import replace
 # from tracemalloc import start
@@ -196,17 +197,22 @@ def test_tick_planner_logs_and_writes_mcap(mcap_out_dir, empty_grid, planner_con
 @pytest.mark.slow
 def test_tick_planner_logs_mazes_and_writes_mcap(
     mcap_out_dir: Path,
-    maze_grid_and_poses: Tuple[Any, List[float], List[float]],
+    # maze_grid_and_poses: Tuple[Any, List[float], List[float]],
+    maze_world_model,
     planner_config: PlannerConfig,
     start_pose: Pose,
     goal_spec: GoalSpec,
     require_success: bool = True,
 ):
     from dolgov_cbmp.planners import planner_factory
-    grid, start, goal = maze_grid_and_poses
+    # grid, start, goal = maze_grid_and_poses
+    world = maze_world_model
+    grid = world.occupancy_grid
     # update start and goal poses with those from the maze file (necessary since Pose dataclasses are frozen)
-    s_pose = Pose(start[0], start[1], start_pose.theta, start_pose.kappa)
-    g_pose = Pose(goal[0], goal[1], goal_spec.pose.theta, goal_spec.pose.kappa)
+    # s_pose = Pose(start[0], start[1], start_pose.theta, start_pose.kappa)
+    # g_pose = Pose(goal[0], goal[1], goal_spec.pose.theta, goal_spec.pose.kappa)
+    s_pose = Pose(world.start.x, world.start.y, start_pose.theta, start_pose.kappa)
+    g_pose = Pose(world.goal.pose.x, world.goal.pose.y, goal_spec.pose.theta, goal_spec.pose.kappa)
     # create new GoalSpec with updated goal pose
     g_spec = GoalSpec(g_pose, goal_spec.pos_tol, goal_spec.theta_tol) #, goal_spec.kappa_tol)
     planner = planner_factory(grid, planner_config, backend="python")
@@ -232,7 +238,8 @@ def test_tick_planner_logs_mazes_and_writes_mcap(
     pytest.importorskip("foxglove")
     from dolgov_cbmp.telemetry import write_ticks_mcap_foxglove
     fg_path = mcap_out_dir / f"full_sim_fg_{uuid4().hex}.mcap"
-    write_ticks_mcap_foxglove(ticks, fg_path, occ_grid=grid, start_pose=s_pose, goal=g_spec, vehicle=planner_config.vehicle)
+    # write_ticks_mcap_foxglove(ticks, fg_path, occ_grid=grid, start_pose=s_pose, goal=g_spec, vehicle=planner_config.vehicle)
+    write_ticks_mcap_foxglove(ticks, fg_path, world=world, vehicle=planner_config.vehicle)
     # check that both files are readable, i.e. have the magic header and at least one message
     for p in (fg_path, fg_path):
         with open(p, "rb") as f:

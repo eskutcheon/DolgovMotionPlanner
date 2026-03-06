@@ -1,9 +1,6 @@
-
-
+# tests/test_heuristics.py
 import math
-
 import numpy as np
-
 from dolgov_cbmp.models import OccupancyGrid, HolonomicWithObstacles2D, NonHolonomicWithoutObstaclesTable
 from dolgov_cbmp.structs import GridSpec, PlannerConfig, VehicleParams, Pose
 from dolgov_cbmp.utils import compute_distance_to_obstacles_m, compute_gvd_distance_m
@@ -43,7 +40,7 @@ def test_nonholonomic_table_zero_at_goal_and_euclidean_far():
     cfg = PlannerConfig(
         grid=GridSpec(resolution=1.0, theta_bins=36, kappa_bins=11),
         vehicle=VehicleParams(),
-        kappa_rate_samples=5,
+        curvature={"kappa_rate_samples": 5},
         heuristics=heuristics,
     )
     nh = NonHolonomicWithoutObstaclesTable(cfg)
@@ -54,7 +51,7 @@ def test_nonholonomic_table_zero_at_goal_and_euclidean_far():
     val = nh(far, goal)
     assert abs(val - 100.0) < 1e-6, f"Heuristic at far point should approximate Euclidean distance: {val}"
 
-#& UPDATE: new heuristic test to verify that the GVD-based heuristic produces a finite field
+# heuristic test to verify that the GVD-based heuristic produces a finite field
 def test_compute_gvd_distance_returns_finite_field():
     occ = np.zeros((30, 30), dtype=bool)
     occ[10:20, 15] = True
@@ -77,8 +74,8 @@ def test_compute_gvd_distance_from_occ():
     assert np.all(np.isfinite(dV))
     assert float(np.max(dV)) > 0.0
 
-#& UPDATE: test to check that nonholonomic table respects the kappa bins override (important for preventing memory blow-up for high-res grids)
 def test_nonholonomic_table_respects_nh_kappa_bins_override():
+    """ test to check that nonholonomic table respects the kappa bins override (important for preventing memory blow-up for high-res grids) """
     from dolgov_cbmp.structs import HeuristicParams
     heuristics = HeuristicParams(
         nh_kappa_bins=5,

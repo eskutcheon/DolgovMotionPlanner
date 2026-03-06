@@ -119,12 +119,13 @@ class HybridAStarPlannerBase:
     ):
         self.map = occ_grid
         self.cfg = config
-        self.indexer = Indexer(occ_grid, kappa_bins=occ_grid.grid.kappa_bins, kappa_max=occ_grid.grid.kappa_max)
+        # TODO: planning to keep kappa_bins as part of the grid spec to mirror theta_bins, but need to finish integration of the new WorldModel
+        self.indexer = Indexer(occ_grid, kappa_bins=config.grid.kappa_bins, kappa_max=config.curvature.kappa_max)
         self.model = BicycleModel(config.vehicle)
         Vehicle = config.vehicle
         # Curvature-rate controls $u = \frac{d\kappa}{ds}$
-        m = int(config.kappa_rate_samples)
-        u_max = float(config.kappa_rate_max)
+        m = int(config.curvature.kappa_rate_samples)
+        u_max = float(config.curvature.kappa_rate_max)
         # curvature samples used to generate edges during search ($u \in \{-\kappa_{max}, 0, +\kappa_{max}\}$)
         self.u_set = np.linspace(-u_max, u_max, m, dtype=np.float64) if m > 1 else np.array([0.0], dtype=np.float64)
         # Footprint offsets for collision checking.
@@ -143,11 +144,9 @@ class HybridAStarPlannerBase:
             # TODO: consider making compute_gvd_distance into a class method of VoronoiField and having it persist rather than instantiating just for rho
             #   making it persist is likely necessary for later if we move into dynamic rho fields that depend on the current state of the search
             #       (e.g., learned cost-to-go or dynamic obstacles); for now we compute it once below since it's a purely geometric property of the map
-            # self._dV = compute_gvd_distance_m(self._dO, self.map.grid.resolution)
             self._dV = compute_gvd_distance_m(occ_grid.occ, config.grid.resolution)
-            self._rho = VoronoiField(self._dO, self.cfg.voronoi_alpha, self.cfg.voronoi_dO_max, dV_m=self._dV).rho
-        #& UPDATE: new path smoothing object does actual nonlinear optimization for refinement
-        self.refiner = PathRefiner(self.map, self.cfg.smoother, self._dO, self.cfg.kappa_max, footprint_offsets=self.footprint_offsets, rho=self._rho)
+            self._rho = VoronoiField(self._dO, self.cfg.heuristics.voronoi_alpha, self.cfg.heuristics.voronoi_dO_max, dV_m=self._dV).rho
+        self.refiner = PathRefiner(self.map, self.cfg.smoother, self._dO, self.cfg.curvature.kappa_max, footprint_offsets=self.footprint_offsets, rho=self._rho)
         self.goal_shot_mode = str(getattr(self.cfg.connector, "mode", "beam")).lower().strip()
         # Conservative collision gate radius (distance-transform) + cached footprint per theta bin
         res = float(self.map.grid.resolution)
@@ -216,13 +215,11 @@ class HybridAStarPlannerBase:
         W = self.cfg.weights
         c = ds
         if direction < 0:
-            #& UPDATE: just realized I had the reverse penalty in range [0, 1], essentially making this a reward; changing default to 1.1
             c *= W.reverse_penalty
         # TODO: investigate adding the switch penalty as a kronecker delta term in the integration cost function
         if direction != prev_direction:
             c += W.switch_dir_penalty # hard to believe but any multiplicative factor up to 4x doesn't really help
         # curvature-rate regularization (smooth steering evolution)
-        # c += W.kappa_rate_weight * ds + W.kappa_rate_change_weight # * abs(u - prev_u)
         c += W.kappa_rate_weight * u**2 * ds + W.kappa_rate_change_weight * abs(u - prev_u)
         # integrated Voronoi cost along the edge ($ \rho \in \[0,1\] $) if enabled
         if rho_int > 0.0 and float(W.voronoi_weight) > 0.0:
@@ -294,7 +291,7 @@ class HybridAStarPlannerBase:
         dV = float(self._dV[iy, ix]) if self._dV is not None else dO
         ds = beta * (dO + dV) # equal to $2 \beta * dO$ if dV unavailable
         #& UPDATE: Additional improvement - reduce step in high-curvature plans to improve local maneuver quality
-        kappa_ratio = min(1.0, abs(float(pose.kappa)) / max(1e-6, float(self.cfg.kappa_max)))
+        kappa_ratio = min(1.0, abs(float(pose.kappa)) / max(1e-6, float(self.cfg.curvature.kappa_max)))
         ds /= (1.0 + float(step_cfg.curvature_slowdown_gain) * kappa_ratio)
         ds = min(max(ds, ds_min), ds_max) # clamp to [ds_min, ds_max]
         return ds
@@ -304,16 +301,6 @@ class HybridAStarPlannerBase:
         ix, iy = self.map.world_to_grid(pose.x, pose.y)
         if not self.map.in_bounds(ix, iy):
             return False
-        # #! OLDER VERSION - testing for source of regression
-        # clearance = float(self._dO[iy, ix])
-        # if clearance >= self._gate_radius_m:
-        #     return True
-        # if self._footprint_cache is not None and clearance >= self._gate_radius_m + self._exact_margin_m:
-        #     # Conservative cached check is safe here - (exact theta bin selection occurs inside rollout; using exact for safety)
-        #     return True
-        # # tight / ambiguous: do exact footprint check
-        # is_free = pose_is_free(pose, self.map, self.footprint_offsets)
-        # return is_free
         return self.model.pose_is_free_fast(
             pose, self.map, self.footprint_offsets, dO=float(self._dO[iy, ix]),
             gate_radius_m=self._gate_radius_m, exact_check_margin_m=self._exact_margin_m,
@@ -324,10 +311,8 @@ class HybridAStarPlannerBase:
     def _terminal_score(self, pose: Pose, goal: GoalSpec, h2d: HolonomicWithObstacles2D) -> float:
         dp = float(np.hypot(pose.x - goal.pose.x, pose.y - goal.pose.y))
         dth = abs(wrap_angle(pose.theta - goal.pose.theta))
-        # dk = abs(float(pose.kappa - goal.pose.kappa))
-        score = sum(w * val for w, val in zip(self.cfg.connector.terminal_score_weights(), (dp, dth))) #, dk)))
-        # TODO: add config setting for the heuristic weight in the score
-        return score + 0.1 * self._heuristic(pose, goal, h2d)
+        score = sum(w * val for w, val in zip(self.cfg.connector.terminal_score_weights(), (dp, dth)))
+        return score + self.cfg.weights.score_heuristic_weight * self._heuristic(pose, goal, h2d)
 
 
     def _rollout_kinematic_model(
@@ -343,7 +328,7 @@ class HybridAStarPlannerBase:
             events.on_rollout_attempt(self.cfg.n_substeps)
         result = self.model.rollout(
             pose, u, direction, ds, self.cfg.n_substeps,
-            self.cfg.kappa_max, self.map, self.footprint_offsets,
+            self.cfg.curvature.kappa_max, self.map, self.footprint_offsets,
             dO_m=self._dO, gate_radius_m=self._gate_radius_m, exact_check_margin_m=self._exact_margin_m,
             footprint_cache=self._footprint_cache, theta_bins=self.cfg.grid.theta_bins,
             rho=rho,
@@ -394,7 +379,8 @@ class HybridAStarPlannerBase:
                         if rollout_result is None:
                             continue
                         nxt, rho_int = rollout_result
-                        key = self.indexer.pose_to_key(nxt, direction) #& UPDATE: now that direction is included in the key, we can just use that directly for duplicate detection instead of a separate tuple
+                        #& UPDATE: now that direction is included in the key, we can just use that directly for duplicate detection instead of a separate tuple
+                        key = self.indexer.pose_to_key(nxt, direction)
                         key_tuple = key.as_tuple()
                         if key_tuple in seen_keys:
                             continue
@@ -421,7 +407,7 @@ class HybridAStarPlannerBase:
         """ Reeds-Shepp analytic shot (collision-checked) """
         #! FIXME: need to align with paper by wiring up h2d into the Reeds-Shepp shot generation similarly to the beam search
         # clamp to avoid degenerate case for straight-line shots; also ensures that the step size is well-defined in the reeds_shepp_shot function
-        kappa_max = max(self.cfg.kappa_max, 1e-6)
+        kappa_max = max(self.cfg.curvature.kappa_max, 1e-6)
         turn_radius = 1.0 / kappa_max
         step = float(getattr(self.cfg.connector, "rs_step", 0.25))
         step = max(0.05, step)  # avoid degenerate sampling

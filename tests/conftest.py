@@ -42,8 +42,7 @@ def planner_config(grid_spec, vehicle_params):
         vehicle=vehicle_params,
         step_size=1.0,
         n_substeps=5,
-        # steering_samples=7,
-        kappa_rate_samples=3,
+        curvature={"kappa_rate_samples": 3},
         allow_reverse=True,
         footprint_sample_step=None,
         heuristics=heuristics,
@@ -78,30 +77,53 @@ def grid_with_wall(grid_spec):
 
 
 def get_random_maze_file() -> Path:
-    return Path(np.random.choice(list((Path(__file__).parent / "grids").glob("*.npz"))))
+    return Path(np.random.choice(list((Path(__file__).parent / "world_configs/grids").glob("*.npz"))))
 
 @pytest.fixture
 def easy_maze_file() -> Path:
     """ fixture that provides a path to a random maze file from the grids directory """
-    return Path(r"tests/grids/5x5_square_res100.npz")
-    # return Path(r"tests/grids/5x5_slanted2_res100.npz")
+    return Path(r"tests/world_configs/grids/5x5_square_res100.npz")
+    # return Path(r"tests/world_configs/grids/5x5_slanted2_res100.npz")
 
 @pytest.fixture
 def hard_maze_file() -> Path:
     """ fixture that provides a path to a random maze file from the grids directory """
-    return Path(r"tests/grids/7x7_square_res100.npz")
+    return Path(r"tests/world_configs/grids/7x7_square_res100.npz")
+
+
+# @pytest.fixture
+# def maze_grid_and_poses(grid_spec, easy_maze_file: Path) -> Tuple[Any, List[float], List[float]]:
+#     """ A grid with predefined obstacles for deterministic tests """
+#     from dolgov_cbmp.models.models import OccupancyGrid
+#     # maze_file = get_random_maze_file()
+#     maze_file = easy_maze_file
+#     # maze_file = hard_maze_file
+#     # print("Loading maze grid from file:", maze_file)
+#     occ_grid, start, goal = OccupancyGrid.grid_from_file(maze_file, grid_spec) #, pad_cells=2)
+#     return occ_grid, start, goal
+
+@pytest.fixture
+def maze_grid_and_poses(maze_world_model) -> Tuple[Any, List[float], List[float]]:
+    """Back-compat fixture while tests migrate to WorldModel."""
+    world = maze_world_model
+    return world.occupancy_grid, [world.start.x, world.start.y], [world.goal.pose.x, world.goal.pose.y]
 
 
 @pytest.fixture
-def maze_grid_and_poses(grid_spec, easy_maze_file: Path) -> Tuple[Any, List[float], List[float]]:
-    """ A grid with predefined obstacles for deterministic tests """
+def maze_world_model(easy_maze_file, grid_spec, vehicle_params):
+    #! will assume previous responsibilities of maze_grid_and_poses but for now it's separated
     from dolgov_cbmp.models.models import OccupancyGrid
-    # maze_file = get_random_maze_file()
+    from dolgov_cbmp.structs import WorldModel, Pose, GoalSpec
     maze_file = easy_maze_file
-    # maze_file = hard_maze_file
-    # print("Loading maze grid from file:", maze_file)
-    occ_grid, start, goal = OccupancyGrid.grid_from_file(maze_file, grid_spec) #, pad_cells=2)
-    return occ_grid, start, goal
+    occ_grid, start_xy, goal_xy = OccupancyGrid.grid_from_file(maze_file, grid_spec) #, pad_cells=2)
+    world = WorldModel(
+        occupancy_grid=occ_grid,
+        start=Pose(*start_xy, theta=0.0, kappa=0.0),
+        goal=GoalSpec(Pose(*goal_xy, theta=0.0, kappa=0.0)),
+        vehicle=vehicle_params,
+    )
+    world.validate()
+    return world
 
 
 @pytest.fixture
@@ -139,6 +161,18 @@ def mcap_out_dir() -> Path:
 @pytest.fixture
 def cfg_input_dir() -> Path:
     input_dir = Path("tests/configs")
+    input_dir.mkdir(exist_ok=True)
+    return input_dir
+
+@pytest.fixture
+def grid_npz_input_dir() -> Path:
+    input_dir = Path("tests/world_configs/grids")
+    input_dir.mkdir(exist_ok=True)
+    return input_dir
+
+@pytest.fixture
+def grid_input_dir() -> Path:
+    input_dir = Path("tests/world_configs")
     input_dir.mkdir(exist_ok=True)
     return input_dir
 

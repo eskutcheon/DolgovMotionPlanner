@@ -30,7 +30,7 @@ class CLIOverridesModel(BaseModel):
     # TODO: need to change the precedence and conditional dependence of other arguments with this
     #   e.g., don't require start, goal, or grid spec if world_cfg_path is provided
     #   also need some conditional logic in the OccupancyGrid loading and instantiation for a full grid
-    world_cfg_path: Optional[str] = Field(default=None, pattern=r".*\.(yaml|yml|json|jsonl|pkl)$")
+    world_cfg_path: Optional[str] = Field(default=None, pattern=r".*\.(yaml|yml|json|jsonl|pkl|npz|hdf5)$")
     config_file: Optional[str] = None
     start_x: float = 5.0
     start_y: float = 5.0
@@ -60,12 +60,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="DolgovMotionPlanner CLI with YAML config and dot-path parameter overrides",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    # TODO: might just want to support this via --opts (can't remember if this is supported in argparse or just jsonargparse where I used it before)
     parser.add_argument("--config", dest="config_file", help="Path to YAML config file")
-    # TODO: add some arguments to provide the occupancy grid in various formats (not just .npz)
-        # primarily support pkl, hdf5, json/jsonl, onnx, etc.
     parser.add_argument("--backend", choices=("python", "cpp"), default="python")
     parser.add_argument("--max-expansions", type=int, default=100_000)
+    # TODO: still need to work on this for currently unsupported file types and the precedence logic with other args like start/goal/grid specs
     parser.add_argument("--world-cfg", dest="world_cfg_path", help="Path to world config file (YAML/JSON/PKL) that can override planner config values and provide map data")
     # start pose
     parser.add_argument("--start.x", dest="start_x", type=float, default=5.0)

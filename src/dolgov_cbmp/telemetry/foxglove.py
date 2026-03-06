@@ -5,7 +5,7 @@ import struct
 from dataclasses import dataclass, field #, asdict
 from typing import Iterable, Sequence, Tuple, Optional, List, TypeAlias, Dict
 # local imports
-from dolgov_cbmp.structs import PlannerTick, Pose, GoalSpec, VehicleParams
+from dolgov_cbmp.structs import PlannerTick, Pose, GoalSpec, VehicleParams, WorldModel
 from dolgov_cbmp.models.models import OccupancyGrid
 from dolgov_cbmp.utils import get_occupied_rectangles
 
@@ -30,29 +30,8 @@ from foxglove.schemas import (
     FrameTransform, FrameTransforms,
 )
 
-# Done just for brevity for all the RGB and XYZ tuples
-FloatTripleType: TypeAlias = Tuple[float, float, float]
-RGBAType: TypeAlias = Tuple[float, float, float, float]  # (r, g, b, a) with values in [0.0, 1.0]
 
-# TODO: might need to deal with enum casting differences across foxglove-sdk versions (i.e. Float32 vs FLOAT32)
-FIELDS_XYZ_RGBA = [
-    PackedElementField(name="x", offset=0, type=NumericType.Float32),
-    PackedElementField(name="y", offset=4, type=NumericType.Float32),
-    PackedElementField(name="z", offset=8, type=NumericType.Float32),
-    PackedElementField(name="red", offset=12, type=NumericType.Uint8),
-    PackedElementField(name="green", offset=13, type=NumericType.Uint8),
-    PackedElementField(name="blue", offset=14, type=NumericType.Uint8),
-    PackedElementField(name="alpha", offset=15, type=NumericType.Uint8),
-]
-
-FIELDS_RGBA = [
-    PackedElementField(name="red", offset=0, type=NumericType.Uint8),
-    PackedElementField(name="green", offset=1, type=NumericType.Uint8),
-    PackedElementField(name="blue", offset=2, type=NumericType.Uint8),
-    PackedElementField(name="alpha", offset=3, type=NumericType.Uint8),
-]
-
-# RGBA constants (0.0-1.0 floats)
+# RGBA constants (0.0-1.0 floats) for easy tweaking
 RGBA_WHITE_SOFT = (1.00, 1.00, 1.00, 0.8)      # (255, 255, 255, 208)  # soft white
 RGBA_WHITE_FULL = (1.00, 1.00, 1.00, 1.00)      # (255, 255, 255, 255)  # opaque white
 RGBA_BLUE_EDGE = (0.55, 0.80, 1.00, 0.45)       # (140, 204, 255, 114)  # light blue, semi-transparent
@@ -74,6 +53,29 @@ RGBA_PRUNED_NEAR = (0.80, 0.70, 0.18, 0.55)     # (204, 178, 45, 140)   # warm y
 RGBA_PRUNED_FAR = (0.55, 0.90, 0.30, 0.22)      # (140, 229, 76, 56)    # greenish yellow, low alpha
 RGBA_VEHICLE_SHADOW = (0.55, 0.55, 0.55, 0.60)  # (140, 140, 140, 153)  # medium gray, semi-transparent
 RGBA_BLACK = (0.0, 0.0, 0.0, 1.0)               # (0, 0, 0, 255)        # opaque black
+
+
+# Done just for brevity for all the RGB and XYZ tuples
+FloatTripleType: TypeAlias = Tuple[float, float, float]
+RGBAType: TypeAlias = Tuple[float, float, float, float]  # (r, g, b, a) with values in [0.0, 1.0]
+
+# TODO: might need to deal with enum casting differences across foxglove-sdk versions (i.e. Float32 vs FLOAT32)
+FIELDS_XYZ_RGBA = [
+    PackedElementField(name="x", offset=0, type=NumericType.Float32),
+    PackedElementField(name="y", offset=4, type=NumericType.Float32),
+    PackedElementField(name="z", offset=8, type=NumericType.Float32),
+    PackedElementField(name="red", offset=12, type=NumericType.Uint8),
+    PackedElementField(name="green", offset=13, type=NumericType.Uint8),
+    PackedElementField(name="blue", offset=14, type=NumericType.Uint8),
+    PackedElementField(name="alpha", offset=15, type=NumericType.Uint8),
+]
+
+FIELDS_RGBA = [
+    PackedElementField(name="red", offset=0, type=NumericType.Uint8),
+    PackedElementField(name="green", offset=1, type=NumericType.Uint8),
+    PackedElementField(name="blue", offset=2, type=NumericType.Uint8),
+    PackedElementField(name="alpha", offset=3, type=NumericType.Uint8),
+]
 
 
 # TODO: might condense these into fewer specs classes that define the primitives' arguments; could be pretty versatile
@@ -446,7 +448,13 @@ def write_ticks_mcap_foxglove(
     start_pose: Optional[Pose] = None,
     goal: Optional[GoalSpec] = None,
     vehicle: Optional[VehicleParams] = None,
+    world: Optional[WorldModel] = None
 ) -> None:
+    #& UPDATE: now supporting importing world model directly - in the future this should be a primary positional argument without a default
+    if world is not None:
+        occ_grid = world.occupancy_grid
+        start_pose = world.start
+        goal = world.goal
     sink = FoxgloveTickSink(out_path, viz=viz, occ_grid=occ_grid, start_pose=start_pose, goal=goal, vehicle=vehicle)
     # iterate through ticks and log to channels
     try:

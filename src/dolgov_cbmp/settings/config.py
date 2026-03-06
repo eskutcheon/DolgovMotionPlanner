@@ -9,15 +9,25 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator #, model_vali
 from dolgov_cbmp.structs import GoalSpec, GridSpec, PlannerConfig, Pose, VehicleParams
 
 
+# TODO: really considering moving most of these methods to cli.py and moving all things related to PlannerConfig to this file
+
 class PlanningRunConfigModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
     backend: str = Field(default="python", pattern=r"^(python|cpp)$")
     max_expansions: int = Field(default=100_000, ge=1000, le=1_000_000)
-    world_cfg_path: Optional[str] = Field(default=None, pattern=r".*\.(yaml|yml|json|jsonl|pkl)$")
-    planner: PlannerConfig #Model
-    start: Pose #Model
-    goal: GoalSpec #Model
+    world_cfg_path: Optional[str] = Field(default=None, pattern=r".*\.(yaml|yml|json|jsonl|pkl|npz|hdf5)$")
+    planner: PlannerConfig
+    start: Pose
+    goal: GoalSpec
 
+    @field_validator("world_cfg_path")
+    @classmethod
+    def _validate_world_cfg_path(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        if not Path(value).expanduser().is_file():
+            raise ValueError(f"world_cfg_path {value} does not exist or is not a file")
+        return value
 
 #------------------------------------------------------------------------------
 # helper methods used in CLI parsing

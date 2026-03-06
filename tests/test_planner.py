@@ -180,7 +180,7 @@ def test_curvature_aware_step_policy_reduces_step_at_high_kappa(empty_grid, plan
     )
     planner = planner_factory(empty_grid, cfg, backend="python")
     low_kappa = Pose(15.0, 15.0, 0.0, 0.0)
-    high_kappa = Pose(15.0, 15.0, 0.0, cfg.kappa_max)
+    high_kappa = Pose(15.0, 15.0, 0.0, cfg.curvature.kappa_max)
     ds_low = planner._select_step(low_kappa)
     ds_high = planner._select_step(high_kappa)
     assert ds_high < ds_low

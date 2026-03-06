@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/dolgov_cbmp/world_config.schema.json",
+  "title": "Dolgov CBMP World Config",
+  "type": "object",
+  "required": ["format_version", "grid", "occupancy", "start", "goal"],
+  "additionalProperties": false,
+  "properties": {
+    "format_version": { "type": "string", "const": "1.0" },
+    "grid": {
+      "type": "object",
+      "required": ["resolution", "theta_bins", "origin_xy", "kappa_bins"],
+      "additionalProperties": false,
+      "properties": {
+        "resolution": { "type": "number", "exclusiveMinimum": 0.0 },
+        "theta_bins": { "type": "integer", "minimum": 4 },
+        "origin_xy": {
+          "type": "array",
+          "items": [{ "type": "number" }, { "type": "number" }],
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "kappa_bins": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "occupancy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["data"],
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": { "type": ["integer", "boolean"] }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["path"],
+          "additionalProperties": false,
+          "properties": {
+            "path": { "type": "string" },
+            "key": { "type": "string", "default": "occupancy" }
+          }
+        }
+      ]
+    },
+    "start": {
+      "type": "object",
+      "required": ["x", "y", "theta", "kappa"],
+      "additionalProperties": false,
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "theta": { "type": "number" },
+        "kappa": { "type": "number" }
+      }
+    },
+    "goal": {
+      "type": "object",
+      "required": ["pose", "pos_tol", "theta_tol"],
+      "additionalProperties": false,
+      "properties": {
+        "pose": { "$ref": "#/$defs/pose" },
+        "pos_tol": { "type": "number", "minimum": 0.0 },
+        "theta_tol": { "type": "number", "minimum": 0.0 }
+      }
+    },
+    "step_size": { "type": "number", "exclusiveMinimum": 0.0 }
+  },
+  "$defs": {
+    "pose": {
+      "type": "object",
+      "required": ["x", "y", "theta", "kappa"],
+      "additionalProperties": false,
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "theta": { "type": "number" },
+        "kappa": { "type": "number" }
+      }
+    }
+  }
+}

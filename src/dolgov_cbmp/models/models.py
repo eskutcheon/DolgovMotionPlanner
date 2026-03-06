@@ -200,15 +200,15 @@ class VoronoiField:
 #? NOTE: both heuristic model classes have repeated use of some of the same discretization methods and may as well use a shared Indexer class
 class Indexer:
     """ Discretizes (x,y,theta,dir) and provides a flat index for best-g arrays """
-    def __init__(self, grid: OccupancyGrid, kappa_bins: Optional[int] = None, kappa_max: Optional[float] = None):
+    def __init__(self, grid: OccupancyGrid, kappa_max: float, kappa_bins: Optional[int] = None):
         self.grid = grid
         self.W = int(grid.width)
         self.H = int(grid.height)
         self.theta_bins = int(grid.grid.theta_bins)
         self.dtheta = TAU / float(self.theta_bins)
         self.kappa_bins = int(kappa_bins or grid.grid.kappa_bins)
-        self.kappa_max = float(kappa_max or grid.grid.kappa_max)
-        self.kappa_min = -self.kappa_max        # placeholder; should be set from PlannerConfig
+        self.kappa_max = float(kappa_max)
+        self.kappa_min = -self.kappa_max
         self.dkappa = (self.kappa_max - self.kappa_min) / self.kappa_bins
 
     def pose_to_key(self, pose: Pose, direction: int) -> DiscreteKey:
@@ -263,18 +263,6 @@ class BicycleModel:
         y1 = y0 + sigma * ds * math.sin(thm)
         th1 = wrap_angle(th0 + sigma * km * ds)
         return Pose(x=x1, y=y1, theta=th1, kappa=k1)
-
-    # @staticmethod
-    # def propagate_const_kappa(pose: Pose, kappa: float, direction: int, ds: float, kappa_max = None) -> Pose:
-    #     """ Propagate the bicycle model for distance $ds$ with constant curvature $kappa$ and direction (+1 forward, -1 reverse) """
-    #     sigma = 1.0 if direction >= 0 else -1.0
-    #     x0, y0, th0 = pose.x, pose.y, pose.theta
-    #     # midpoint integration (same style as BicycleModel.propagate)
-    #     thm = th0 + 0.5 * sigma * kappa * ds
-    #     x1 = x0 + sigma * ds * math.cos(thm)
-    #     y1 = y0 + sigma * ds * math.sin(thm)
-    #     th1 = wrap_angle(th0 + sigma * kappa * ds)
-    #     return Pose(x=x1, y=y1, theta=th1, kappa=kappa)
 
     # for step selection and collision checking - for now it needs access to the footprint cache and distance field on the planner
     @staticmethod

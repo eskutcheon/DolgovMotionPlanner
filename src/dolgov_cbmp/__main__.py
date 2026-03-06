@@ -1,25 +1,18 @@
-
-
+# src/dolgov_cbmp/__main__.py
 """ CLI entry point for running a simple planning example """
-
+from typing import Optional
 import numpy as np
 
 from dolgov_cbmp.structs import PlannerConfig
 from dolgov_cbmp.models import OccupancyGrid
 from dolgov_cbmp.planners import planner_factory
-from dolgov_cbmp.settings import parse_planning_inputs
+from dolgov_cbmp.settings import parse_planning_inputs, load_world_model
 
 
-    # TODO: might actually just make a new file in `settings` for ingesting inputs from world config files
-    #   - mostly since this is getting pretty unwieldy and the CLI parsing is really just one way to provide those inputs
-    #   - eventually want to support a more programmatic API for running the planner with different configs as well
-    #   - should be able to remove and reuse a couple methods currently in OccupancyGrid
-    # TODO: really considering making a new major object like `WorldModel` that encapsulates the OccupancyGrid, the GridSpec, and the start and goal poses
-    #   - also considering adding something new like `CurvatureParams` to either the PlannerConfig or to GridSpec for defining curvature kinematics
-    #       (e.g. `kappa_max`, `kappa_bins`, `kappa_min`) since this is really a core part of the problem definition and is currently duplicated in some places
-    #       though we'd need to differentiate between what are physical world specifications vs planner constraints (e.g. `kappa_rate_max`, `kappa_rate_samples`)
-    #   - might pitch this to Copilot since it touches so many files - remember to get it to update the README
-    #   - this could also contain the Indexer model used by the planners, or if nothing else a factory method for creating an Indexer object
+# TODO: might actually just make a new file in `settings` for ingesting inputs from world config files
+#   - mostly since this is getting pretty unwieldy and the CLI parsing is really just one way to provide those inputs
+#   - eventually want to support a more programmatic API for running the planner with different configs as well
+#   - should be able to remove and reuse a couple methods currently in OccupancyGrid
 
 
 def get_toggles_from_cli(cfg: PlannerConfig) -> dict[str, bool]:
@@ -37,25 +30,30 @@ def get_toggles_from_cli(cfg: PlannerConfig) -> dict[str, bool]:
 
 def main() -> None:
     args = parse_planning_inputs()
-    # TODO: replace with loading a map from file, e.g., via world_cfg_path
-    occ = np.zeros((200, 200), dtype=bool)
-    occ[80:120, 100] = True
-    # TODO: also consider implementing the new major WorldConfig to replace the instantiations below
-    og = OccupancyGrid(occ, args.planner_config.grid)
-
-    planner = planner_factory(og, args.planner_config, backend=args.backend)
+    planner_cfg = args.planner_config
+    start, goal = args.start, args.goal
+    og: Optional[OccupancyGrid] = None
+    if args.world_cfg_path:
+        world, planner_cfg = load_world_model(args.world_cfg_path, args.planner_config)
+        og = world.occupancy_grid
+        start = world.start
+        goal = world.goal
+    else:
+        occ = np.zeros((200, 200), dtype=bool)
+        occ[80:120, 100] = True
+        og = OccupancyGrid(occ, args.planner_config.grid)
+    planner = planner_factory(og, planner_cfg, backend=args.backend)
     print(
         "planning with settings:"
-        f"\n  backend={args.backend}, max_expansions={args.max_expansions}, step_size={args.planner_config.step_size}, "
-        # TODO: honestly really need to add the shape here, but it requires refactoring how and when we create these and the OccupancyGrid together
-        f"\n  grid resolution={args.planner_config.grid.resolution}, grid size={(og.height, og.width)}, "
-        f"\n  start=({args.start.x}, {args.start.y}, {args.start.theta}), "
-        f"\t  goal=({args.goal.pose.x}, {args.goal.pose.y}, {args.goal.pose.theta})"
+        f"\n  backend={args.backend}, max_expansions={args.max_expansions}, step_size={planner_cfg.step_size}, "
+        f"\n  grid resolution={planner_cfg.grid.resolution}, grid size={(og.height, og.width)}, "
+        f"\n  start=({start.x}, {start.y}, {start.theta}), "
+        f"\t  goal=({goal.pose.x}, {goal.pose.y}, {goal.pose.theta})"
     )
-    for toggle_name, enabled in get_toggles_from_cli(args.planner_config).items():
+    for toggle_name, enabled in get_toggles_from_cli(planner_cfg).items():
         print(f"  {toggle_name}: {'ON' if enabled else 'OFF'}")
     # run planner
-    path, stats = planner.plan(args.start, args.goal, max_expansions=args.max_expansions)
+    path, stats = planner.plan(start, goal, max_expansions=args.max_expansions)
     # print from returned path and stats
     print(
         f"path poses={len(path)} | expanded={stats.expanded} | "

@@ -91,6 +91,43 @@ dolgov_cbmp --help      # NOTE: may change this target name in the near future
 Both entry points support YAML config files (`--config`) and dot-path overrides (`--set weights.reverse_penalty=2.0`).
 
 
+
+### World configuration files (`--world-cfg`)
+
+The CLI now supports loading world state (grid + occupancy + start/goal + optional step size) from a single world config path. Supported top-level world config formats are `yaml`, `yml`, `json`, `jsonl` (single object line), `pkl`, and legacy maze `.npz` files.
+
+Recommended convention for long-term compatibility:
+- Use **YAML** (or JSON) for world metadata and planner-facing fields.
+- Store larger occupancy arrays in a separate **`.npy`** or **`.npz`** file and reference it from YAML.
+- Validate files against `docs/world_config.schema.json` when generating worlds from scripts.
+
+Example:
+
+```yaml
+format_version: "1.0"
+grid:
+  resolution: 0.5
+  theta_bins: 36
+  origin_xy: [0.0, 0.0]
+  kappa_bins: 11
+occupancy:
+  path: tests/world_configs/my_map.npy
+start: {x: 2.0, y: 2.0, theta: 0.0, kappa: 0.0}
+goal:
+  pose: {x: 14.0, y: 20.0, theta: 1.57, kappa: 0.0}
+  pos_tol: 0.5
+  theta_tol: 0.26
+step_size: 1.0
+```
+
+Run with:
+
+```bash
+python -m dolgov_cbmp --world-cfg path/to/world.yaml
+```
+
+
+
 ### Creating new test grids from images of mazes
 
 There exists a test script in `scripts/` that will convert images of mazes to pre-processed `numpy` occupancy grid, as well as the start and goal positions for the maze.
@@ -99,7 +136,7 @@ There exists a test script in `scripts/` that will convert images of mazes to pr
 python scripts/npz_from_maze_images.py "path/to/image-directory"
 ```
 
-By default, the output .npz files are saved to "tests/grids", but the output directory and grid resolution(s) may be specified through additional CLI arguments:
+By default, the output .npz files are saved to "tests/world_configs/grids", but the output directory and grid resolution(s) may be specified through additional CLI arguments:
 
 ```python
 python scripts/npz_from_maze_images.py "path/to/image-directory" --output_dir "path/to/out-directory" --resolutions 50 100 200

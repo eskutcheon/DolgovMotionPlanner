@@ -1,6 +1,5 @@
-
+# tests/test_motion_models.py
 import math
-
 from dolgov_cbmp.models import BicycleModel
 from dolgov_cbmp.structs import Pose, VehicleParams
 
@@ -33,7 +32,6 @@ def test_bicycle_propagate_arc_has_expected_heading_change():
     model = BicycleModel(VehicleParams(wheelbase=L))
     p0 = Pose(0.0, 0.0, 0.0, kappa=k0)
     p1: Pose = model.propagate(p0, u=u, direction=+1, ds=ds, kappa_max=0.2)
-    #!!! FIXME: this will probably always fail since kappa below is derived from steer and L rather than the new approach
     # kappa = math.tan(steer) / L # NOTE: this kappa definition gives a final theta error around 0.028945
     k1 = k0 + u * ds  # new curvature (without clamping) after applying curvature rate u over distance ds
     # yaw update now uses midpoint curvature for better accuracy
