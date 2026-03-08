@@ -27,7 +27,7 @@ class CLIOverridesModel(BaseModel):
     # TODO: need to change the precedence and conditional dependence of other arguments with this
     #   e.g., don't require start, goal, or grid spec if world_cfg_path is provided
     #   also need some conditional logic in the OccupancyGrid loading and instantiation for a full grid
-    world_cfg_path: Optional[str] = Field(default=None, pattern=r".*\.(yaml|yml|json|jsonl|pkl|npz|hdf5)$")
+    world_cfg_path: Optional[str] = Field(default=None, pattern=r".*\.(yaml|yml|json|jsonl|pkl|pickle|npz|hdf5|h5|hdf)$")
     config_file: Optional[str] = None
     start_x: float = 5.0
     start_y: float = 5.0

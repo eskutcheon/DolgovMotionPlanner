@@ -210,7 +210,7 @@ class PlanningRunConfigModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
     backend: str = Field(default="python", pattern=r"^(python|cpp)$")
     max_expansions: int = Field(default=100_000, ge=1000, le=1_000_000)
-    world_cfg_path: Optional[str] = Field(default=None, pattern=r".*\.(yaml|yml|json|jsonl|pkl|npz|hdf5)$")
+    world_cfg_path: Optional[str] = Field(default=None, pattern=r".*\.(yaml|yml|json|jsonl|pkl|pickle|npz|hdf5|h5|hdf)$")
     planner: PlannerConfig
     start: Pose
     goal: GoalSpec

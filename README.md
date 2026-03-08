@@ -51,12 +51,14 @@ python -m venv .env
     ```bash
     python -m pip install -U pip
     pip install -e .
+    pip install -e ".[dev]"
     pytest -v
     ```
     b. Optional C++ backend:
     ```bash
     python -m pip install -U pip
     pip install -e ".[cpp]"
+    pip install -e ".[dev]"
     $env:DOLGOV_BUILD_CPP="1" # on Linux: export DOLGOV_BUILD_CPP="1"
     pip install -e . -v
     pytest -m cpp
@@ -85,7 +87,7 @@ After installation (`pip install -e .`), you can run:
 
 ```bash
 python -m dolgov_cbmp --help
-dolgov_cbmp --help      # NOTE: may change this target name in the near future
+dolgov_cbmp --help
 ```
 
 Both entry points support YAML config files (`--config`) and dot-path overrides (`--set weights.reverse_penalty=2.0`).
@@ -94,11 +96,11 @@ Both entry points support YAML config files (`--config`) and dot-path overrides 
 
 ### World configuration files (`--world-cfg`)
 
-The CLI now supports loading world state (grid + occupancy + start/goal + optional step size) from a single world config path. Supported top-level world config formats are `yaml`, `yml`, `json`, `jsonl` (single object line), `pkl`, and legacy maze `.npz` files.
+The CLI now supports loading world state (grid + occupancy + start/goal + optional step size) from a single world config path. Supported top-level world config formats are `yaml`, `yml`, `json`, `jsonl` (single object line), `pkl`/`pickle`, `npz`, `hdf5`/`h5`/`hdf`, plus legacy maze `.npz` files.
 
-Recommended convention for long-term compatibility:
-- Use **YAML** (or JSON) for world metadata and planner-facing fields.
-- Store larger occupancy arrays in a separate **`.npy`** or **`.npz`** file and reference it from YAML.
+Recommended config convention for long-term compatibility:
+- Use YAML or JSON for world metadata and planner-facing fields.
+- Store larger occupancy arrays in a separate **`.npy`**, **`.npz`**, or **`.h5`** dataset and then reference it from YAML.
 - Validate files against `docs/world_config.schema.json` when generating worlds from scripts.
 
 Example:
@@ -112,6 +114,7 @@ grid:
   kappa_bins: 11
 occupancy:
   path: tests/world_configs/my_map.npy
+  key: occupancy  # used for .npz/.h5 sources
 start: {x: 2.0, y: 2.0, theta: 0.0, kappa: 0.0}
 goal:
   pose: {x: 14.0, y: 20.0, theta: 1.57, kappa: 0.0}
