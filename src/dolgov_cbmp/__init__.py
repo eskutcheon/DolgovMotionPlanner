@@ -1,10 +1,10 @@
 # src/dolgov_cbmp/__init__.py
 """ Public API for DolgovMotionPlanner / dolgov-cbmp package """
 
-from .planners import planner_factory
-from .settings import parse_planning_inputs
+from .structs import WorldModel, GoalSpec, GridSpec, Pose
+from .settings import parse_planning_inputs, PlannerConfig, VehicleParams
 from .models import OccupancyGrid
-from .structs import WorldModel, GoalSpec, GridSpec, PlannerConfig, Pose, VehicleParams
+from .planners import planner_factory
 
 __all__ = [
     "planner_factory",

@@ -3,14 +3,13 @@ import math
 from pathlib import Path
 import numpy as np
 import pytest
-from dolgov_cbmp.settings import parse_planning_inputs, load_world_model #, PlanningRunConfigModel
-from dolgov_cbmp.structs import GridSpec, PlannerConfig, VehicleParams
+from dolgov_cbmp.settings import parse_planning_inputs, load_world_model, PlannerConfig, VehicleParams
 
 
 def test_planner_config_rejects_even_kappa_rate_samples():
     with pytest.raises(ValueError):
         PlannerConfig(
-            grid=GridSpec(resolution=1.0, theta_bins=36, kappa_bins=11), #, kappa_max=0.2),
+            # grid=GridSpec(resolution=1.0, theta_bins=36, kappa_bins=11), #, kappa_max=0.2),
             vehicle=VehicleParams(),
             curvature={"kappa_rate_samples": 4},
         )
@@ -19,7 +18,7 @@ def test_planner_config_rejects_even_kappa_rate_samples():
 def test_planner_config_rejects_step_size_larger_than_step_size_max():
     with pytest.raises(ValueError):
         PlannerConfig(
-            grid=GridSpec(resolution=1.0, theta_bins=36, kappa_bins=11), # kappa_max=0.2),
+            # grid=GridSpec(resolution=1.0, theta_bins=36, kappa_bins=11), # kappa_max=0.2),
             vehicle=VehicleParams(),
             step_size=2.0,
             step_policy={"step_size_max": 1.5},
@@ -27,7 +26,10 @@ def test_planner_config_rejects_step_size_larger_than_step_size_max():
 
 
 def test_load_world_model_from_legacy_npz(grid_npz_input_dir: Path):
-    planner_cfg = PlannerConfig(grid=GridSpec(resolution=1.0, theta_bins=36, kappa_bins=11), vehicle=VehicleParams())
+    planner_cfg = PlannerConfig(
+        # grid=GridSpec(resolution=1.0, theta_bins=36, kappa_bins=11),
+        vehicle=VehicleParams()
+    )
     occ = np.zeros((5, 5), dtype=bool)
     poses = np.array([[1, 1], [3, 3]])
     npz_path = grid_npz_input_dir / "loading_test_maze.npz"
@@ -36,10 +38,13 @@ def test_load_world_model_from_legacy_npz(grid_npz_input_dir: Path):
     assert world.occupancy_grid.height == 5
     assert world.start.x >= 0.0
     assert world.goal.pose.x >= 0.0
-    assert planner_cfg.grid.resolution == 1.0
+    assert world.grid.resolution == 1.0
 
 def test_load_world_model_from_yaml_and_npy(grid_input_dir: Path, cfg_input_dir: Path):
-    planner_cfg =PlannerConfig(grid=GridSpec(resolution=1.0, theta_bins=36, kappa_bins=11), vehicle=VehicleParams())
+    planner_cfg =PlannerConfig(
+        # grid=GridSpec(resolution=1.0, theta_bins=36, kappa_bins=11),
+        vehicle=VehicleParams()
+    )
     occ = np.zeros((6, 7), dtype=bool)
     occ[0,0] = True
     occ_path = grid_input_dir / "occ.npy"
@@ -67,12 +72,13 @@ goal:
         kappa: 0.0
     pos_tol: 0.8
     theta_tol: 0.1
-step_size: 1.5
+planner_overrides:
+    step_size: 1.5
         """
     cfg_path.write_text(yaml_input, encoding="utf-8")
     world, planner_cfg = load_world_model(cfg_path, planner_cfg)
     assert world.occupancy_grid.occ.shape == (6, 7)
-    assert planner_cfg.grid.resolution == 0.5
+    assert world.grid.resolution == 0.5
     assert planner_cfg.step_size == 1.5
     assert world.start.x == 1.0
     assert world.goal.pose.y == 2.5
@@ -101,9 +107,6 @@ def test_cli_merges_yaml_and_command_line_overrides(cfg_input_dir: Path):
 backend: python
 max_expansions: 12345
 planner:
-    grid:
-        resolution: 0.8
-        theta_bins: 64
     weights:
         reverse_penalty: 1.9
 start:
@@ -125,8 +128,8 @@ goal:
     assert args.start.x == 1.0
     assert args.goal.pose.theta == pytest.approx(1.2)
     assert args.goal.theta_tol == pytest.approx(0.2)
-    assert args.planner_config.grid.resolution == pytest.approx(0.8)
-    assert args.planner_config.grid.theta_bins == 64
+    # assert args.planner_config.grid.resolution == pytest.approx(0.8)
+    # assert args.planner_config.grid.theta_bins == 64
     assert args.planner_config.weights.reverse_penalty == pytest.approx(2.1)
 
 

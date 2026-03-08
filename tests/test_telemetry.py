@@ -8,7 +8,8 @@ import pytest
 import math
 from typing import List, Tuple, Any
 # local imports
-from dolgov_cbmp.structs import PlannerTick, Pose, GoalSpec, PlannerConfig
+from dolgov_cbmp.structs import PlannerTick, Pose, GoalSpec
+from dolgov_cbmp.settings import PlannerConfig
 from dolgov_cbmp.utils import goal_reached
 
 

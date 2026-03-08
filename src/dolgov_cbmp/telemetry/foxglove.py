@@ -2,10 +2,11 @@
 from pathlib import Path
 import math
 import struct
-from dataclasses import dataclass, field #, asdict
+from dataclasses import dataclass, field
 from typing import Iterable, Sequence, Tuple, Optional, List, TypeAlias, Dict
 # local imports
-from dolgov_cbmp.structs import PlannerTick, Pose, GoalSpec, VehicleParams, WorldModel
+from dolgov_cbmp.structs import PlannerTick, Pose, GoalSpec, WorldModel
+from dolgov_cbmp.settings import VehicleParams
 from dolgov_cbmp.models.models import OccupancyGrid
 from dolgov_cbmp.utils import get_occupied_rectangles
 

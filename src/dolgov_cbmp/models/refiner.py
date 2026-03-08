@@ -14,9 +14,10 @@ import math
 import numpy as np
 from scipy.optimize import minimize
 # local module imports
-from .models import OccupancyGrid
-from dolgov_cbmp.structs import Pose, PathSmootherParams
-from dolgov_cbmp.utils import TAU, SQRT2, wrap_angle, pose_is_free
+from dolgov_cbmp.structs import Pose
+from dolgov_cbmp.utils import wrap_angle, pose_is_free
+from dolgov_cbmp.settings.config import PathSmootherParams
+from dolgov_cbmp.models import OccupancyGrid
 
 
 class PathRefiner:

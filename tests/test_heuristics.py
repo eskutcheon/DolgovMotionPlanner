@@ -1,9 +1,11 @@
 # tests/test_heuristics.py
 import math
 import numpy as np
-from dolgov_cbmp.models import OccupancyGrid, HolonomicWithObstacles2D, NonHolonomicWithoutObstaclesTable
-from dolgov_cbmp.structs import GridSpec, PlannerConfig, VehicleParams, Pose
+
+from dolgov_cbmp.structs import GridSpec, Pose
+from dolgov_cbmp.settings import PlannerConfig, VehicleParams
 from dolgov_cbmp.utils import compute_distance_to_obstacles_m, compute_gvd_distance_m
+from dolgov_cbmp.models import OccupancyGrid, HolonomicWithObstacles2D, NonHolonomicWithoutObstaclesTable
 
 
 def test_distance_to_obstacles_zero_on_obstacles():
@@ -30,7 +32,7 @@ def test_holonomic_heuristic_on_empty_grid_has_reasonable_values():
 
 
 def test_nonholonomic_table_zero_at_goal_and_euclidean_far():
-    from dolgov_cbmp.structs import HeuristicParams
+    from dolgov_cbmp.settings.config import HeuristicParams
     heuristics = HeuristicParams(
         # keep the nonholonomic table smaller for tests
         nh_table_xy_radius=6.0,
@@ -38,7 +40,7 @@ def test_nonholonomic_table_zero_at_goal_and_euclidean_far():
         nh_table_theta_res=math.radians(15.0),
     )
     cfg = PlannerConfig(
-        grid=GridSpec(resolution=1.0, theta_bins=36, kappa_bins=11),
+        # grid=GridSpec(resolution=1.0, theta_bins=36, kappa_bins=11),
         vehicle=VehicleParams(),
         curvature={"kappa_rate_samples": 5},
         heuristics=heuristics,
@@ -76,7 +78,7 @@ def test_compute_gvd_distance_from_occ():
 
 def test_nonholonomic_table_respects_nh_kappa_bins_override():
     """ test to check that nonholonomic table respects the kappa bins override (important for preventing memory blow-up for high-res grids) """
-    from dolgov_cbmp.structs import HeuristicParams
+    from dolgov_cbmp.settings.config import HeuristicParams
     heuristics = HeuristicParams(
         nh_kappa_bins=5,
         nh_table_xy_radius=4.0,
@@ -84,7 +86,7 @@ def test_nonholonomic_table_respects_nh_kappa_bins_override():
         nh_table_theta_res=math.radians(20.0),
     )
     cfg = PlannerConfig(
-        grid=GridSpec(resolution=1.0, theta_bins=36, kappa_bins=11),
+        # grid=GridSpec(resolution=1.0, theta_bins=36, kappa_bins=11),
         vehicle=VehicleParams(),
         heuristics=heuristics,
     )

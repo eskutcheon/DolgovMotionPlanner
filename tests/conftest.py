@@ -23,14 +23,16 @@ def grid_spec():
 
 @pytest.fixture
 def vehicle_params():
-    from dolgov_cbmp.structs import VehicleParams
+    from dolgov_cbmp.settings import VehicleParams
     # defaults are fine for most tests
     return VehicleParams()
 
 
+# @pytest.fixture
+# def planner_config(grid_spec, vehicle_params):
 @pytest.fixture
-def planner_config(grid_spec, vehicle_params):
-    from dolgov_cbmp.structs import PlannerConfig, HeuristicParams
+def planner_config(vehicle_params):
+    from dolgov_cbmp.settings.config import PlannerConfig, HeuristicParams
     heuristics = HeuristicParams(
         # keep the nonholonomic table smaller for tests
         nh_table_xy_radius=8.0,
@@ -38,7 +40,7 @@ def planner_config(grid_spec, vehicle_params):
         nh_table_theta_res=np.deg2rad(10.0),
     )
     return PlannerConfig(
-        grid=grid_spec,
+        # grid=grid_spec,
         vehicle=vehicle_params,
         step_size=1.0,
         n_substeps=5,
@@ -91,17 +93,6 @@ def hard_maze_file() -> Path:
     return Path(r"tests/world_configs/grids/7x7_square_res100.npz")
 
 
-# @pytest.fixture
-# def maze_grid_and_poses(grid_spec, easy_maze_file: Path) -> Tuple[Any, List[float], List[float]]:
-#     """ A grid with predefined obstacles for deterministic tests """
-#     from dolgov_cbmp.models.models import OccupancyGrid
-#     # maze_file = get_random_maze_file()
-#     maze_file = easy_maze_file
-#     # maze_file = hard_maze_file
-#     # print("Loading maze grid from file:", maze_file)
-#     occ_grid, start, goal = OccupancyGrid.grid_from_file(maze_file, grid_spec) #, pad_cells=2)
-#     return occ_grid, start, goal
-
 @pytest.fixture
 def maze_grid_and_poses(maze_world_model) -> Tuple[Any, List[float], List[float]]:
     """Back-compat fixture while tests migrate to WorldModel."""
@@ -112,7 +103,7 @@ def maze_grid_and_poses(maze_world_model) -> Tuple[Any, List[float], List[float]
 @pytest.fixture
 def maze_world_model(easy_maze_file, grid_spec, vehicle_params):
     #! will assume previous responsibilities of maze_grid_and_poses but for now it's separated
-    from dolgov_cbmp.models.models import OccupancyGrid
+    from dolgov_cbmp.models import OccupancyGrid
     from dolgov_cbmp.structs import WorldModel, Pose, GoalSpec
     maze_file = easy_maze_file
     occ_grid, start_xy, goal_xy = OccupancyGrid.grid_from_file(maze_file, grid_spec) #, pad_cells=2)

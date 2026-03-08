@@ -1,7 +1,9 @@
 # tests/test_motion_models.py
 import math
+# project imports
+from dolgov_cbmp.structs import Pose
+from dolgov_cbmp.settings import VehicleParams
 from dolgov_cbmp.models import BicycleModel
-from dolgov_cbmp.structs import Pose, VehicleParams
 
 
 def test_bicycle_propagate_straight_line():
@@ -16,7 +18,6 @@ def test_bicycle_propagate_straight_line():
 def test_bicycle_propagate_reverse_straight_line():
     model = BicycleModel(VehicleParams(wheelbase=2.5))
     p0 = Pose(0.0, 0.0, math.pi / 2.0)
-    # p1 = model.propagate(p0, steer=0.0, direction=-1, ds=2.0)
     p1 = model.propagate(p0, u=0.0, direction=-1, ds=2.0, kappa_max=0.2)
     # facing +y; reversing moves -y
     assert abs(p1.x - 0.0) < 1e-12
@@ -25,7 +26,6 @@ def test_bicycle_propagate_reverse_straight_line():
 
 def test_bicycle_propagate_arc_has_expected_heading_change():
     L = 2.5
-    # steer = math.radians(20.0)
     u = 0.1  # curvature = 0.1 1/meters
     ds = 1.0
     k0 = 0.0

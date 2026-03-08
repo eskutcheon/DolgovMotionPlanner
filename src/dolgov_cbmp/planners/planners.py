@@ -1,10 +1,11 @@
 # src/dolgov_cbmp/planners/planners.py
-from typing import List, Optional, Tuple, Literal, Dict
+from typing import List, Optional, Tuple, Literal, Dict, Union
 import heapq
 import time
 import numpy as np
 # local module imports
-from dolgov_cbmp.structs import Pose, GoalSpec, PlannerStats, HybridNode, PlannerConfig, DiscreteKey
+from dolgov_cbmp.structs import Pose, GoalSpec, PlannerStats, HybridNode, DiscreteKey, WorldModel
+from dolgov_cbmp.settings import PlannerConfig
 from dolgov_cbmp.models import *
 from dolgov_cbmp.planners.planner_base import HybridAStarPlannerBase, PlannerEventStream, TickCallback
 
@@ -84,13 +85,15 @@ class BestGWrapper:
 
 
 def planner_factory(
-    occ_grid: OccupancyGrid,
+    world_or_grid: Union[OccupancyGrid, WorldModel],
     config: PlannerConfig,
     backend: Literal["python", "cpp"] = "python",
     use_rectangle_footprint: bool = True,
     use_voronoi_edge_cost: bool = True,
 ) -> HybridAStarPlannerBase:
     """ Factory function to create a Hybrid A* planner with the requested backend. """
+    # allow passing either OccupancyGrid or WorldModel for backwards compatibility and convenience; planner will extract occupancy grid from world if needed
+    occ_grid = world_or_grid.occupancy_grid if isinstance(world_or_grid, WorldModel) else world_or_grid
     if backend == "cpp":
         if not CPP_AVAILABLE:
             raise RuntimeError("C++ backend requested but not available")

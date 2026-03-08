@@ -3,11 +3,11 @@ from typing import List, Dict, Optional, Tuple, Any
 import heapq
 import math
 import numpy as np
-
-from dolgov_cbmp.models import OccupancyGrid #, BicycleModel
-from dolgov_cbmp.structs import Pose, PlannerConfig
+# project imports
+from dolgov_cbmp.structs import Pose
+from dolgov_cbmp.settings import PlannerConfig
 from dolgov_cbmp.utils import TAU, SQRT2, wrap_angle, kappa_to_bin, theta_to_bin
-
+from dolgov_cbmp.models import OccupancyGrid
 
 
 class HolonomicWithObstacles2D:

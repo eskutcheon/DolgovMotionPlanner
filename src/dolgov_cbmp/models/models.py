@@ -4,8 +4,9 @@ import math
 import numpy as np
 np.set_printoptions(precision=3, suppress=True, threshold=100000)
 from pathlib import Path
-
-from dolgov_cbmp.structs import GridSpec, VehicleParams, Pose, DiscreteKey
+# project imports
+from dolgov_cbmp.structs import GridSpec, Pose, DiscreteKey
+from dolgov_cbmp.settings import VehicleParams
 from dolgov_cbmp.utils import TAU, wrap_angle, pose_is_free, pose_is_free_cached_cells, kappa_to_bin, theta_to_bin
 
 

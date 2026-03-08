@@ -5,7 +5,8 @@ import heapq
 import time
 import numpy as np
 # local module imports
-from dolgov_cbmp.structs import Pose, GoalSpec, PlannerStats, HybridNode, PlannerConfig, PlannerTick
+from dolgov_cbmp.structs import Pose, GoalSpec, PlannerStats, HybridNode, PlannerTick
+from dolgov_cbmp.settings import PlannerConfig
 from dolgov_cbmp.models import *
 from dolgov_cbmp.utils import (
     SQRT2, wrap_angle, pose_is_free, compute_distance_to_obstacles_m, make_rectangle_footprint_offsets,
@@ -120,7 +121,7 @@ class HybridAStarPlannerBase:
         self.map = occ_grid
         self.cfg = config
         # TODO: planning to keep kappa_bins as part of the grid spec to mirror theta_bins, but need to finish integration of the new WorldModel
-        self.indexer = Indexer(occ_grid, kappa_bins=config.grid.kappa_bins, kappa_max=config.curvature.kappa_max)
+        self.indexer = Indexer(occ_grid, kappa_bins=occ_grid.grid.kappa_bins, kappa_max=config.curvature.kappa_max)
         self.model = BicycleModel(config.vehicle)
         Vehicle = config.vehicle
         # Curvature-rate controls $u = \frac{d\kappa}{ds}$
@@ -132,7 +133,7 @@ class HybridAStarPlannerBase:
         self.footprint_offsets: Optional[np.ndarray] = None
         if use_rectangle_footprint:
             # using 0.25 multiplier to get denser sampling than old default (0.5*resolution)
-            step = config.footprint_sample_step or 0.25 * float(config.grid.resolution)
+            step = config.footprint_sample_step or 0.25 * float(occ_grid.grid.resolution)
             self.footprint_offsets = make_rectangle_footprint_offsets(
                 Vehicle.wheelbase, Vehicle.width, Vehicle.front_overhang, Vehicle.rear_overhang, step
             )
@@ -144,7 +145,7 @@ class HybridAStarPlannerBase:
             # TODO: consider making compute_gvd_distance into a class method of VoronoiField and having it persist rather than instantiating just for rho
             #   making it persist is likely necessary for later if we move into dynamic rho fields that depend on the current state of the search
             #       (e.g., learned cost-to-go or dynamic obstacles); for now we compute it once below since it's a purely geometric property of the map
-            self._dV = compute_gvd_distance_m(occ_grid.occ, config.grid.resolution)
+            self._dV = compute_gvd_distance_m(occ_grid.occ, occ_grid.grid.resolution)
             self._rho = VoronoiField(self._dO, self.cfg.heuristics.voronoi_alpha, self.cfg.heuristics.voronoi_dO_max, dV_m=self._dV).rho
         self.refiner = PathRefiner(self.map, self.cfg.smoother, self._dO, self.cfg.curvature.kappa_max, footprint_offsets=self.footprint_offsets, rho=self._rho)
         self.goal_shot_mode = str(getattr(self.cfg.connector, "mode", "beam")).lower().strip()
@@ -156,7 +157,7 @@ class HybridAStarPlannerBase:
         self._exact_margin_m = float(res)
         self._footprint_cache: Optional[List[np.ndarray]] = None
         if self.footprint_offsets is not None:
-            self._footprint_cache = build_orientation_binned_footprint_cache(self.footprint_offsets, res, int(self.cfg.grid.theta_bins), dilate_cells=1)
+            self._footprint_cache = build_orientation_binned_footprint_cache(self.footprint_offsets, res, int(occ_grid.grid.theta_bins), dilate_cells=1)
         # Non-holonomic goal-local heuristic table is goal-independent and can be cached
         if self.cfg.heuristics.use_nonholonomic:
             self._nonhol = NonHolonomicWithoutObstaclesTable(config)
@@ -304,7 +305,7 @@ class HybridAStarPlannerBase:
         return self.model.pose_is_free_fast(
             pose, self.map, self.footprint_offsets, dO=float(self._dO[iy, ix]),
             gate_radius_m=self._gate_radius_m, exact_check_margin_m=self._exact_margin_m,
-            footprint_cache=self._footprint_cache, theta_bins=self.cfg.grid.theta_bins,
+            footprint_cache=self._footprint_cache, theta_bins=self.map.grid.theta_bins,
         )
 
 
@@ -330,7 +331,7 @@ class HybridAStarPlannerBase:
             pose, u, direction, ds, self.cfg.n_substeps,
             self.cfg.curvature.kappa_max, self.map, self.footprint_offsets,
             dO_m=self._dO, gate_radius_m=self._gate_radius_m, exact_check_margin_m=self._exact_margin_m,
-            footprint_cache=self._footprint_cache, theta_bins=self.cfg.grid.theta_bins,
+            footprint_cache=self._footprint_cache, theta_bins=self.map.grid.theta_bins,
             rho=rho,
         )
         if result is None and events is not None:

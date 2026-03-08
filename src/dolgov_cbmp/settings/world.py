@@ -8,10 +8,10 @@ import pickle
 import numpy as np
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
-# from dolgov_cbmp.settings.config import PlannerConfig
+# project imports
+from dolgov_cbmp.structs import GoalSpec, GridSpec, Pose, WorldModel
+from dolgov_cbmp.settings import VehicleParams, PlannerConfig
 from dolgov_cbmp.models import OccupancyGrid
-from dolgov_cbmp.structs import GoalSpec, GridSpec, PlannerConfig, Pose, WorldModel
-
 
 class OccupancyInlineSource(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -32,8 +32,9 @@ class WorldConfigSchema(BaseModel):
     occupancy: Union[OccupancyInlineSource, OccupancyFileSource]
     start: Pose
     goal: GoalSpec
-    step_size: Optional[float] = Field(default=None, gt=0.0, le=50.0)
-    # TODO: will be adding more supported parameters from here like vehicle params stuff and other (sort of) world state stuff
+    # step_size: Optional[float] = Field(default=None, gt=0.0, le=50.0)
+    vehicle: Optional[VehicleParams] = None
+    planner_overrides: Dict[str, Any] = Field(default_factory=dict)
 
 
 
@@ -57,14 +58,23 @@ def _load_doc(path: Path) -> Dict[str, Any]:
         raise ValueError("World config root must be an object/mapping")
     return payload
 
+def _deep_merge(target: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _deep_merge(target[key], value)
+        else:
+            target[key] = value
+    return target
 
-def _load_occupancy(source: Union[OccupancyInlineSource, OccupancyFileSource]) -> np.ndarray:
+def _load_occupancy(source: Union[OccupancyInlineSource, OccupancyFileSource], base_path: Union[Path, str]) -> np.ndarray:
     if isinstance(source, OccupancyInlineSource):
         return np.asarray(source.data, dtype=bool)
     occ_path = Path(source.path).expanduser()
-    # if not occ_path.is_absolute():
-    #     occ_path = (base_path / occ_path).resolve()
-    #     print("Resolved relative occ_path to:", occ_path)
+    if not occ_path.is_absolute():
+        direct_path = occ_path.resolve()
+        base_path = Path(base_path)
+        occ_path = direct_path if direct_path.is_file() else (base_path / occ_path).resolve()
+        print("Resolved relative occ_path to:", occ_path)
     if occ_path.suffix.lower() == ".npz":
         npz = np.load(occ_path)
         if source.key not in npz:
@@ -79,35 +89,28 @@ def load_world_model(world_cfg_path: Union[str, Path], planner_config: PlannerCo
     """ load world state and optional planner overrides from a world config file """
     path = Path(world_cfg_path).expanduser().resolve()
     suffix = path.suffix.lower()
-    # Backward compatibility for existing maze .npz files.
+    # Backward compatibility for existing maze .npz files
+    # TODO: update for newer .npz schemas that may contain grid specs and other world parameters
     if suffix == ".npz":
-        occ_grid, start_xy, goal_xy = OccupancyGrid.grid_from_file(path, planner_config.grid)
+        occ_grid, start_xy, goal_xy = OccupancyGrid.grid_from_file(path, GridSpec())
         start = Pose(float(start_xy[0]), float(start_xy[1]), 0.0, 0.0)
         goal = GoalSpec(Pose(float(goal_xy[0]), float(goal_xy[1]), 0.0, 0.0))
         world = WorldModel(occupancy_grid=occ_grid, start=start, goal=goal, vehicle=planner_config.vehicle)
         world.validate()
         return world, planner_config
     raw_doc = _load_doc(path)
-    cfg = WorldConfigSchema.model_validate(raw_doc)
-    occ = _load_occupancy(cfg.occupancy)
-    world_grid = cfg.grid
-    updated_cfg = planner_config
-    if planner_config.grid != world_grid:
-        planner_kwargs = asdict(planner_config)
-        planner_kwargs["grid"] = world_grid.to_dict()
-        # planner_kwargs["curvature"]["kappa_bins"] = world_grid.kappa_bins
-        # planner_kwargs["curvature"]["kappa_max"] = world_grid.kappa_max
-        if cfg.step_size is not None:
-            planner_kwargs["step_size"] = cfg.step_size
-        updated_cfg = PlannerConfig(**planner_kwargs)
-    elif cfg.step_size is not None:
-        planner_kwargs = asdict(planner_config)
-        planner_kwargs["step_size"] = cfg.step_size
-        updated_cfg = PlannerConfig(**planner_kwargs)
+    world_cfg = WorldConfigSchema.model_validate(raw_doc)
+    planner_overrides = dict(world_cfg.planner_overrides)
+    if "grid" in planner_overrides:
+        raise ValueError("planner_overrides.grid is not supported; world grid must be defined at world root")
+    planner_payload = asdict(planner_config)
+    _deep_merge(planner_payload, planner_overrides)
+    updated_cfg = PlannerConfig(**planner_payload)
+    occ = _load_occupancy(world_cfg.occupancy, base_path=path.parent)
     world = WorldModel(
-        occupancy_grid=OccupancyGrid(occ, world_grid),
-        start=cfg.start,
-        goal=cfg.goal,
+        occupancy_grid=OccupancyGrid(occ, world_cfg.grid),
+        start=world_cfg.start,
+        goal=world_cfg.goal,
         vehicle=updated_cfg.vehicle,
     )
     world.validate()

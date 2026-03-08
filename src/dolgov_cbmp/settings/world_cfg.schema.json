@@ -69,9 +69,22 @@
         "pose": { "$ref": "#/$defs/pose" },
         "pos_tol": { "type": "number", "minimum": 0.0 },
         "theta_tol": { "type": "number", "minimum": 0.0 }
+    }
+  },
+    "vehicle": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "wheelbase": { "type": "number", "exclusiveMinimum": 0.0 },
+        "width": { "type": "number", "exclusiveMinimum": 0.0 },
+        "front_overhang": { "type": "number", "minimum": 0.0 },
+        "rear_overhang": { "type": "number", "minimum": 0.0 },
+        "max_steer": { "type": "number", "exclusiveMinimum": 0.0 }
       }
     },
-    "step_size": { "type": "number", "exclusiveMinimum": 0.0 }
+    "planner_overrides": {
+      "type": "object"
+    }
   },
   "$defs": {
     "pose": {
