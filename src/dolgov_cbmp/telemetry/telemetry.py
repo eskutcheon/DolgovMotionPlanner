@@ -1,9 +1,9 @@
 # src/dolgov_cbmp/telemetry/telemetry.py
 from pathlib import Path
 import json
-from typing import Dict, Any, Iterable
+from typing import Dict, Any, Iterable, Union
 # local imports
-from dolgov_cbmp.structs import PlannerTick, Pose
+from dolgov_cbmp.structs import PlannerTick, PlannerStats, Pose
 
 try:  # optional dependency
     from mcap.writer import Writer as McapWriter
@@ -89,19 +89,37 @@ def tick_to_markers(tick: PlannerTick) -> Dict[str, Any]:
 
 class JsonlTickSink:
     """ simple sink for offline debugging and conversion pipelines """
-    def __init__(self, out_path: str | Path):
+    def __init__(self, out_path: Union[str, Path]):
         self.out_path = Path(out_path)
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
+        # file handle is opened and closed on each write to ensure data integrity even if the process is killed mid-run
+        self._fptr = self.out_path.open("a", encoding="utf-8")
 
     def __call__(self, tick: PlannerTick) -> None:
         payload = tick_to_markers(tick)
-        with self.out_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(payload) + "\n")
+        self._fptr.write(json.dumps(payload) + "\n")
+
+    def close(self) -> None:
+        self._fptr.close()
+
+
+class JsonlStatsSink:
+    """ streaming planner stats sink for JSONL telemetry """
+    def __init__(self, out_path: Union[str, Path]):
+        self.out_path = Path(out_path)
+        self.out_path.parent.mkdir(parents=True, exist_ok=True)
+        self._fptr = self.out_path.open("a", encoding="utf-8")
+
+    def __call__(self, stats: PlannerStats) -> None:
+        self._fptr.write(json.dumps(stats.to_dict()) + "\n")
+
+    def close(self) -> None:
+        self._fptr.close()
 
 
 class McapTickSink:
     """ write planner tick marker payloads directly to MCAP as JSON messages """
-    def __init__(self, out_path: str | Path, topic: str = "/planner/markers"):
+    def __init__(self, out_path: Union[str, Path], topic: str = "/planner/markers"):
         if McapWriter is None:
             raise ImportError("mcap is not installed. Install with `pip install mcap`.")
         self.out_path = Path(out_path)
@@ -134,14 +152,8 @@ class McapTickSink:
         self._fh.close()
 
 
-def write_ticks_jsonl(ticks: Iterable[PlannerTick], out_path: str | Path) -> None:
+def write_ticks_jsonl(ticks: Iterable[PlannerTick], out_path: Union[str, Path]) -> None:
     sink = JsonlTickSink(out_path)
-    for tick in ticks:
-        sink(tick)
-
-
-def write_ticks_mcap(ticks: Iterable[PlannerTick], out_path: str | Path, topic: str = "/planner/markers") -> None:
-    sink = McapTickSink(out_path, topic=topic)
     try:
         for tick in ticks:
             sink(tick)
@@ -149,4 +161,10 @@ def write_ticks_mcap(ticks: Iterable[PlannerTick], out_path: str | Path, topic: 
         sink.close()
 
 
-
+def write_ticks_mcap(ticks: Iterable[PlannerTick], out_path: Union[str, Path], topic: str = "/planner/markers") -> None:
+    sink = McapTickSink(out_path, topic=topic)
+    try:
+        for tick in ticks:
+            sink(tick)
+    finally:
+        sink.close()

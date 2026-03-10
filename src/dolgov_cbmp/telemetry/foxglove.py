@@ -240,6 +240,7 @@ class FoxgloveTickSink:
             # "transform": FrameTransformChannel("/planner/world_to_viz") if self.occ_grid is not None else None,
         }
         self._static_logged = False
+        self._closed = False
 
     def __call__(self, tick: PlannerTick) -> None:
         #   since they don't change per tick and it would be wasteful to log them repeatedly
@@ -283,9 +284,19 @@ class FoxgloveTickSink:
             self.channels['explored'].log(poses_to_pointcloud(tick.explored_poses, stamp, frame_id=fid, rgba=self.viz.explored.node_rgba))
         self.channels['collisions'].log(poses_to_pointcloud(tick.collision_poses, stamp, frame_id=fid, rgba=self.viz.explored.collisions_rgba))
 
+    #& UPDATE: restructured this class as a context manager to ensure proper cleanup of the MCAP file and channels
+    #   also simplifies usage by passing the instance itself as the planner callback
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         self._ctx.__exit__(None, None, None)
 
+    def __enter__(self) -> "FoxgloveTickSink":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
 
 # -----------------------------------------------------------------------------

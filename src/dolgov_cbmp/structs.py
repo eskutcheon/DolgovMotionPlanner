@@ -129,6 +129,12 @@ class PlannerStats:
     def elapsed_s(self) -> float:
         return self.end_time_s - self.start_time_s if self.end_time_s > self.start_time_s else 0.0
 
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def clone(self) -> "PlannerStats":
+        return PlannerStats(**asdict(self))
+
 
 @dataclass(slots=True)
 class PlannerTick:

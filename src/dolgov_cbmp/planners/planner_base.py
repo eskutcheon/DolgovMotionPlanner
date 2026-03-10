@@ -1,6 +1,6 @@
 # src/dolgov_cbmp/planners/planner_base.py
 
-from typing import List, Optional, Tuple, TypeAlias, Callable
+from typing import List, Optional, Tuple, TypeAlias, Callable, Any
 import heapq
 import time
 import numpy as np
@@ -16,6 +16,8 @@ from dolgov_cbmp.utils import (
 
 # planner tick callback type alias for telemetry integration - accepts a PlannerTick object containing the current search state and statistics, and returns None
 TickCallback: TypeAlias = Callable[[PlannerTick], None]
+# planner stats callback type alias for final statistics reporting - accepts a PlannerStats object containing cumulative search statistics, and returns None
+StatsCallback: TypeAlias = Callable[[PlannerStats], None]
 # stores the current frontier of the analytic beam search, sorted by a terminal score that combines distance to goal with heuristic guidance
 SearchFrontierType: TypeAlias = List[Tuple[float, Pose, List[Pose], int, float, float]]
 
@@ -25,11 +27,21 @@ SearchFrontierType: TypeAlias = List[Tuple[float, Pose, List[Pose], int, float, 
     # empty data stream would still have commands for simple actions like incrementing class variables
 class PlannerEventStream:
     """ small event collector for planner stats and optional tick snapshots """
-    def __init__(self, stats: PlannerStats, start_time_s: float, callback: Optional[TickCallback], stride: int):
+    def __init__(
+        self,
+        stats: PlannerStats,
+        start_time_s: float,
+        tick_callback: Optional[TickCallback],
+        tick_stride: int,
+        stats_callback: Optional[StatsCallback] = None,
+        stats_stride: int = 500
+    ):
         self.stats = stats
         self.start_time_s = float(start_time_s)
-        self.callback = callback
-        self.stride = max(1, int(stride))
+        self.tick_callback = tick_callback
+        self.tick_stride = max(1, int(tick_stride))
+        self.stats_callback = stats_callback
+        self.stats_stride = max(1, int(stats_stride))
         self.explored_since_tick: List[Pose] = []
         # TODO: improve storage efficiency by only preserving the indices of relevant explored edges and reconstructing the poses from the nodes list
         self.explored_edges_since_tick: List[Tuple[Pose, Pose]] = []
@@ -63,15 +75,40 @@ class PlannerEventStream:
     def on_analytic_shot(self, path: Optional[List[Pose]]) -> None:
         self.latest_analytic_shot = list(path) if path else []
 
+    def on_analytic_attempt(self) -> None:
+        self.stats.analytic_attempts += 1
+
+    def on_analytic_success(self) -> None:
+        self.stats.analytic_successes += 1
+
+    def should_emit_tick(self) -> bool:
+        return self.tick_callback is not None and ((self.stats.expanded % self.tick_stride) == 0)
+
+    def emit_periodic(self, cur_node: HybridNode, cur_pose: Pose, trajectory: List[Pose], open_size: int) -> None:
+        self.emit_tick(force=False, cur_node=cur_node, cur_pose=cur_pose, trajectory=trajectory, open_size=open_size)
+        self.emit_stats(force=False)
+
+    def emit_terminal(self, cur_node: HybridNode, cur_pose: Pose, trajectory: List[Pose], open_size: int) -> None:
+        self.emit_tick(force=True, cur_node=cur_node, cur_pose=cur_pose, trajectory=trajectory, open_size=open_size)
+        self.emit_stats(force=True)
+
+    def emit_stats(self, force: bool = False) -> None:
+        if any((
+            self.stats_callback is None,
+            (not force and (self.stats.expanded % self.stats_stride) != 0),
+        )):
+            return
+        self.stats_callback(self.stats.clone())
+
     def emit_tick(self, force: bool, cur_node: HybridNode, cur_pose: Pose, trajectory: List[Pose], open_size: int) -> None:
         if any((
-            self.callback is None,
-            (not force and (self.stats.expanded % self.stride) != 0),
+            self.tick_callback is None,
+            (not force and (self.stats.expanded % self.tick_stride) != 0),
             # might take this out as an unnecessary (for now) safeguard
             (force and not (self.explored_since_tick or self.collisions_since_tick))
         )):
             return
-        self.callback(
+        self.tick_callback(
             PlannerTick(
                 iteration=self.stats.expanded,
                 time_s=time.perf_counter() - self.start_time_s,
@@ -120,7 +157,6 @@ class HybridAStarPlannerBase:
     ):
         self.map = occ_grid
         self.cfg = config
-        # TODO: planning to keep kappa_bins as part of the grid spec to mirror theta_bins, but need to finish integration of the new WorldModel
         self.indexer = Indexer(occ_grid, kappa_bins=occ_grid.grid.kappa_bins, kappa_max=config.curvature.kappa_max)
         self.model = BicycleModel(config.vehicle)
         Vehicle = config.vehicle
@@ -153,7 +189,7 @@ class HybridAStarPlannerBase:
         res = float(self.map.grid.resolution)
         # print("SANITY CHECK: map resolution: ", res)
         radius = rectangle_circumscribed_radius(Vehicle.wheelbase, Vehicle.width, Vehicle.front_overhang, Vehicle.rear_overhang)
-        self._gate_radius_m = 0.5 * radius + 0.5 * res * SQRT2
+        self._gate_radius_m = radius + 0.5 * res * SQRT2
         self._exact_margin_m = float(res)
         self._footprint_cache: Optional[List[np.ndarray]] = None
         if self.footprint_offsets is not None:
@@ -163,10 +199,45 @@ class HybridAStarPlannerBase:
             self._nonhol = NonHolonomicWithoutObstaclesTable(config)
             self._nonhol.build_offline()
 
+    def _initialize_stats_and_events(
+        self, tick_callback: Optional[TickCallback], tick_stride: int,
+        stats_callback: Optional[StatsCallback], stats_stride: int,
+        telemetry_session: Optional[Any]
+    ) -> Tuple[PlannerStats, PlannerEventStream]:
+        if telemetry_session is not None:
+            if tick_callback is None:
+                tick_callback = telemetry_session.tick_callback
+            if stats_callback is None:
+                stats_callback = telemetry_session.stats_callback
+        stats = PlannerStats()
+        stats.start_time_s = time.perf_counter()
+        events = PlannerEventStream(stats, stats.start_time_s, tick_callback, tick_stride, stats_callback, stats_stride)
+        return stats, events
+
+    def _finalize_terminal_path(self, trajectory: List[Pose]) -> List[Pose]:
+        """ resolving final path and stats at the end of the search, including optional smoothing and safety checks """
+        path: List[Pose] = self._smooth_path(trajectory) if self.cfg.use_path_smoothing else trajectory
+        if path and not self._validate_path_exact(path, verbose=False):
+            # use smoothing if enabled as a safeguard against minor kappa discretization issues causing the final path to fail collision checks
+            if self.cfg.use_path_smoothing and trajectory and self._validate_path_exact(trajectory, verbose=False):
+                print("\n[WARNING] Smoothed path failed exact collision check but unsmoothed path is valid; returning unsmoothed path.")
+                return trajectory
+            # if smoothing is disabled or the smoothed path still fails exact validation, return no path since we can't guarantee safety
+            print("\n[WARNING] Goal reached but final path failed exact collision check; returning no path.")
+            return []
+        # don't raise error for empty path, but allow a warning # TODO: most of these print statements should be hidden behind 'verbose' flag tbh
+        if len(path) == 0:
+            print("\n[WARNING] Goal reached but failed to reconstruct path; returning no path.")
+        # if non-empty path passes validation, return it
+        return path
 
     def plan(
-        self, start: Pose, goal: GoalSpec, max_expansions: int = 200_000,
+        self,
+        start: Pose, goal: GoalSpec,
+        max_expansions: int = 200_000,
         tick_callback: Optional[TickCallback] = None, tick_stride: int = 100,
+        stats_callback: Optional[StatsCallback] = None, stats_stride: int = 1000,
+        telemetry_session: Optional[Any] = None, close_telemetry_session: bool = True,
     ) -> Tuple[List[Pose], PlannerStats]:
         raise NotImplementedError("HybridAStarPlannerBase is an abstract base class; subclasses should implement plan()")
 
@@ -185,9 +256,7 @@ class HybridAStarPlannerBase:
         return float(h_hol)
 
     def _build_goal_heuristics(self, goal: GoalSpec) -> HolonomicWithObstacles2D:
-        # h2d = HolonomicWithObstacles2D(self.map, cost_per_cell=self._rho, dO_m=self._dO, min_clearance_m=self._gate_radius_m)
         # for mazes/corridors, don't prune cells by circumscribed radius here; let the continuous collision checker handle feasibility
-            #? NOTE: test with `test_python_backend_can_pass_through_gap`
         h_cost = self._rho
         if self._rho is not None and self.cfg.weights.voronoi_weight > 0.0 and self.cfg.heuristics.use_voronoi:
             # keep 2D heuristic consistent with the edge cost - edge uses $$w_V * \int \rho ds$$
@@ -241,9 +310,8 @@ class HybridAStarPlannerBase:
         """ exact pose-by-pose footprint validation - starting at the goal and working backwards to the start (for better debugging of failure cases) """
         if verbose:
             # self.map.view_grid(path) #! DEBUGGING
-            #! FIXME: might want to make another argument for pose_is_free to optionally count out-of-bounds entries as collisions
+            #! FIXME: might want to make another argument for pose_is_free to OPTIONALLY count out-of-bounds entries as collisions
             all_coll = [p for p in path if not pose_is_free(p, self.map, self.footprint_offsets)]
-            # print(f"Validating path with {len(path)} poses, {len(all_coll)} in collision, starting from goal:")
             for coll in all_coll[::-1]:  # print in reverse order (from start to goal)
                 ix, iy = self.map.world_to_grid(coll.x, coll.y)
                 print("Collision at pose: ", coll, " - grid indices: ", (iy, ix), "dO at cell: ", self._dO[iy, ix])
@@ -256,7 +324,7 @@ class HybridAStarPlannerBase:
             return False
         # if self.cfg.analytic_every_n <= 0 or expanded % self.cfg.analytic_every_n != 0:
         analytic = self.cfg.analytic
-        if analytic.every_n <= 0:
+        if analytic.every_n <= 0 or expanded % analytic.every_n != 0:
             return False
         dx = pose.x - goal.x
         dy = pose.y - goal.y

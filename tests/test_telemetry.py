@@ -8,7 +8,7 @@ import pytest
 import math
 from typing import List, Tuple, Any
 # local imports
-from dolgov_cbmp.structs import PlannerTick, Pose, GoalSpec
+from dolgov_cbmp.structs import PlannerTick, PlannerStats, Pose, GoalSpec
 from dolgov_cbmp.settings import PlannerConfig
 from dolgov_cbmp.utils import goal_reached
 
@@ -125,6 +125,50 @@ def test_tick_write_jsonl_lines(mcap_out_dir: Path, sample_tick):
     assert "markers" in row0
 
 
+def test_tick_async_dispatcher_fanout(sample_tick: PlannerTick):
+    from dolgov_cbmp.telemetry import PlannerLogDispatcher
+    tick_events = []
+    stats_events = []
+
+    def on_tick(t: PlannerTick):
+        tick_events.append(t.iteration)
+
+    def on_stats(s: PlannerStats):
+        stats_events.append(s.expanded)
+
+    with PlannerLogDispatcher(tick_sinks=[on_tick], stats_sinks=[on_stats], drop_when_full=False) as dispatcher:
+        dispatcher.publish_tick(sample_tick)
+        dispatcher.publish_stats(PlannerStats(expanded=sample_tick.expanded))
+    assert tick_events == [sample_tick.iteration]
+    assert stats_events == [sample_tick.expanded]
+
+
+def test_tick_planner_telemetry_session_writes_live_jsonl(mcap_out_dir: Path, empty_grid, planner_config):
+    from dolgov_cbmp.planners import planner_factory
+    from dolgov_cbmp.telemetry import PlannerTelemetrySession
+    planner = planner_factory(empty_grid, planner_config, backend="python")
+    start = Pose(10.0, 10.0, 0.0)
+    goal = GoalSpec(Pose(50.0, 50.0, 0.0), pos_tol=2.0, theta_tol=math.radians(30.0))
+    tick_path = mcap_out_dir / f"live_ticks_{uuid4().hex}.jsonl"
+    stats_path = mcap_out_dir / f"live_stats_{uuid4().hex}.jsonl"
+    with PlannerTelemetrySession(tick_jsonl_path=tick_path, stats_jsonl_path=stats_path, drop_when_full=False) as session:
+        path, stats = planner.plan(
+            start, goal, max_expansions=20_000,
+            tick_stride=100, stats_stride=250,
+            telemetry_session=session,
+            close_telemetry_session=False,
+        )
+    assert stats.expanded > 0
+    assert path
+    tick_lines = tick_path.read_text(encoding="utf-8").splitlines()
+    stats_lines = stats_path.read_text(encoding="utf-8").splitlines()
+    assert len(tick_lines) > 2
+    assert len(stats_lines) >= 1
+    last_stats = json.loads(stats_lines[-1])
+    assert last_stats["expanded"] == stats.expanded
+
+
+
 def test_tick_foxglove_mcap_topics(mcap_out_dir, sample_tick):
     """ test that the Foxglove MCAP writer publishes to expected topics, with expected encodings and payload structure """
     pytest.importorskip("foxglove")
@@ -160,39 +204,50 @@ def test_tick_planner_logs_and_writes_mcap(mcap_out_dir, empty_grid, planner_con
     # TODO: might replace with conftest fixtures later
     start = Pose(10.0, 10.0, 0.0)
     goal = GoalSpec(Pose(50.0, 50.0, 0.0), pos_tol=2.0, theta_tol=math.radians(30.0))
-    ticks = []
-
-    def on_tick(t):
-        ticks.append(t)
-
-    # keep this moderate so test isn't too slow, but likely to emit multiple ticks
-    path, stats = planner.plan(
-        start,
-        goal,
-        max_expansions=20_000,
-        tick_callback=on_tick,
-        tick_stride=100,
-    )
+    from dolgov_cbmp.telemetry import PlannerTelemetrySession
+    tick_jsonl: Path = mcap_out_dir / f"sim_ticks_{uuid4().hex}.jsonl"
+    stats_jsonl: Path = mcap_out_dir / f"sim_stats_{uuid4().hex}.jsonl"
+    raw_path = mcap_out_dir / f"sim_raw_{uuid4().hex}.mcap"
+    pytest.importorskip("mcap")
+    with PlannerTelemetrySession(
+        tick_jsonl_path=tick_jsonl,
+        stats_jsonl_path=stats_jsonl,
+        tick_mcap_path=raw_path,
+        drop_when_full=False,
+    ) as telemetry:
+        path, stats = planner.plan(
+            start,
+            goal,
+            max_expansions=20_000,
+            tick_stride=100, # keep this moderate so test isn't too slow, but likely to emit multiple ticks
+            stats_stride=250,
+            telemetry_session=telemetry,
+            close_telemetry_session=False,
+        )
     # if not path:
     #     pytest.skip("Planner failed to find a path in the maze, so skipping the rest of the MCAP writing/logging test")
     # sanity check that we got some ticks with expected content
     assert stats.expanded > 0
-    assert len(ticks) > 2  # "several" ticks
+    # assert len(ticks) > 2  # "several" ticks
+    assert path
+    assert len(tick_jsonl.read_text(encoding="utf-8").splitlines()) > 2
+    assert len(stats_jsonl.read_text(encoding="utf-8").splitlines()) >= 1
     pytest.importorskip("mcap")
     from mcap.reader import make_reader
-    from dolgov_cbmp.telemetry import write_ticks_mcap as write_raw_mcap
-    raw_path = mcap_out_dir / f"sim_raw_{uuid4().hex}.mcap"
-    write_raw_mcap(ticks, raw_path)
-    pytest.importorskip("foxglove")
-    from dolgov_cbmp.telemetry import write_ticks_mcap_foxglove
-    fg_path = mcap_out_dir / f"sim_fg_{uuid4().hex}.mcap"
-    write_ticks_mcap_foxglove(ticks, fg_path)
-    # check that both files are readable, i.e. have the magic header and at least one message
-    for p in (raw_path, fg_path):
-        with open(p, "rb") as f:
-            reader = make_reader(f)
-            n = sum(1 for _ in reader.iter_messages())
-        assert n > 0
+    #& UPDATE: no longer writes MCAP directly and instead relies on the PlannerTelemetrySession to dispatch to the McapTickSink
+    #   so we just check that the file is a valid MCAP with expected topic and at least one message
+    # from dolgov_cbmp.telemetry import write_ticks_mcap as write_raw_mcap
+    # raw_path = mcap_out_dir / f"sim_raw_{uuid4().hex}.mcap"
+    # write_raw_mcap(ticks, raw_path)
+    # pytest.importorskip("foxglove")
+    # from dolgov_cbmp.telemetry import write_ticks_mcap_foxglove
+    # fg_path = mcap_out_dir / f"sim_fg_{uuid4().hex}.mcap"
+    # write_ticks_mcap_foxglove(ticks, fg_path)
+    # # check that both files are readable, i.e. have the magic header and at least one message
+    with open(raw_path, "rb") as f:
+        reader = make_reader(f)
+        n = sum(1 for _ in reader.iter_messages())
+    assert n > 0
 
 
 @pytest.mark.slow
@@ -210,22 +265,29 @@ def test_tick_planner_logs_mazes_and_writes_mcap(
     world = maze_world_model
     grid = world.occupancy_grid
     # update start and goal poses with those from the maze file (necessary since Pose dataclasses are frozen)
-    # s_pose = Pose(start[0], start[1], start_pose.theta, start_pose.kappa)
-    # g_pose = Pose(goal[0], goal[1], goal_spec.pose.theta, goal_spec.pose.kappa)
     s_pose = Pose(world.start.x, world.start.y, start_pose.theta, start_pose.kappa)
     g_pose = Pose(world.goal.pose.x, world.goal.pose.y, goal_spec.pose.theta, goal_spec.pose.kappa)
     # create new GoalSpec with updated goal pose
     g_spec = GoalSpec(g_pose, goal_spec.pos_tol, goal_spec.theta_tol) #, goal_spec.kappa_tol)
     planner = planner_factory(grid, planner_config, backend="python")
-    ticks = []
-
-    def on_tick(t):
-        ticks.append(t)
-
-    path, stats = planner.plan(s_pose, g_spec, max_expansions=200_000, tick_callback=on_tick)
+    from dolgov_cbmp.telemetry import PlannerTelemetrySession
+    fg_path = mcap_out_dir / f"full_sim_fg_{uuid4().hex}.mcap"
+    # path, stats = planner.plan(s_pose, g_spec, max_expansions=200_000, tick_callback=on_tick)
+    with PlannerTelemetrySession(drop_when_full=False) as telemetry:
+        pytest.importorskip("foxglove")
+        from dolgov_cbmp.telemetry import FoxgloveTickSink
+        telemetry.subscribe_tick_sink(FoxgloveTickSink(fg_path, occ_grid=grid, start_pose=s_pose, goal=g_spec, vehicle=planner_config.vehicle))
+        path, stats = planner.plan(
+            s_pose,
+            g_spec,
+            max_expansions=200_000,
+            tick_stride=100,
+            telemetry_session=telemetry,
+            close_telemetry_session=False,
+        )
     # sanity check that we got some ticks with expected content
     assert stats.expanded > 0
-    assert len(ticks) > 2
+    # assert len(ticks) > 2
     if require_success:
         assert path, "Planner failed to find a path in the maze"
         assert goal_reached(
@@ -236,14 +298,14 @@ def test_tick_planner_logs_mazes_and_writes_mcap(
     grid.view_grid(path)
     pytest.importorskip("mcap")
     from mcap.reader import make_reader
-    pytest.importorskip("foxglove")
-    from dolgov_cbmp.telemetry import write_ticks_mcap_foxglove
-    fg_path = mcap_out_dir / f"full_sim_fg_{uuid4().hex}.mcap"
-    # write_ticks_mcap_foxglove(ticks, fg_path, occ_grid=grid, start_pose=s_pose, goal=g_spec, vehicle=planner_config.vehicle)
-    write_ticks_mcap_foxglove(ticks, fg_path, world=world, vehicle=planner_config.vehicle)
-    # check that both files are readable, i.e. have the magic header and at least one message
-    for p in (fg_path, fg_path):
-        with open(p, "rb") as f:
-            reader = make_reader(f)
-            n = sum(1 for _ in reader.iter_messages())
-        assert n > 0
+    #& UPDATE: no longer writes MCAP directly and instead relies on the PlannerTelemetrySession to dispatch to the McapTickSink
+    # pytest.importorskip("foxglove")
+    # from dolgov_cbmp.telemetry import write_ticks_mcap_foxglove
+    # fg_path = mcap_out_dir / f"full_sim_fg_{uuid4().hex}.mcap"
+    # # write_ticks_mcap_foxglove(ticks, fg_path, occ_grid=grid, start_pose=s_pose, goal=g_spec, vehicle=planner_config.vehicle)
+    # write_ticks_mcap_foxglove(ticks, fg_path, world=world, vehicle=planner_config.vehicle)
+    # # check that both files are readable, i.e. have the magic header and at least one message
+    with open(fg_path, "rb") as f:
+        reader = make_reader(f)
+        n = sum(1 for _ in reader.iter_messages())
+    assert n > 0

@@ -293,3 +293,5 @@ Testing/
 # omit outputs from the telemetry module
 outputs/
 tests/configs/
+# temporary until I figure out the CI/CD structure for sure
+.github/workflows
